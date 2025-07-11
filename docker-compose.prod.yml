@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    container_name: ada_server
+    ports:
+      - "443:8000"
+    volumes:
+      - ./app:/code/app
+      - ./data:/code/data
+    depends_on:
+      - qdrant
+      - ollama
+    networks:
+      - policy_network
+    env_file:
+      - ./env/.env.prod
+
+networks:
+  policy_network:
+    driver: bridge

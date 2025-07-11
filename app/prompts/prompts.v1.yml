@@ -1,0 +1,24 @@
+generate_summary:
+  name: "Summarize Text"
+  version: 1.0
+  template: |
+    You are a helpful assistant who is an expert at summarizing legal and policy documents.
+    Summarize the following text in one or two concise sentences.
+    
+    TEXT:
+    {text}
+    
+    SUMMARY:
+
+generate_keywords:
+  name: "Extract Keywords"
+  version: 1.0
+  template: |
+    You are an expert at identifying key themes in policy documents.
+    Extract the 5 most important and relevant keywords from the following text.
+    Return them as a comma-separated list.
+    
+    TEXT:
+    {text}
+    
+    KEYWORDS:
