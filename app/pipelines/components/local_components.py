@@ -1,5 +1,8 @@
 import os
+import json
 import asyncio
+import logging
+
 
 from typing import List, Generator, Dict, Any
 from langchain_core.documents import Document
@@ -7,21 +10,111 @@ from qdrant_client import QdrantClient, models
 from concurrent.futures import ThreadPoolExecutor
 from langchain_community.chat_models import ChatOllama
 from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.document_loaders import UnstructuredWordDocumentLoader
 
 from app.config.settings import settings
 from app.pipelines.base import BaseLoader, BaseEmbedder, BaseVectorStore, BaseLLM
-
 from app.prompts.manager import PromptManager
 
+from app.processing.document_processor import DocumentProcessor
+
+logger = logging.getLogger(__name__)
+
+
 class LocalDocxLoader(BaseLoader):
+    """
+    Loads and processes .docx files using DocumentProcessor and creates two types
+    of documents for ingestion:
+    1. A single 'toc' document representing the entire file's structure.
+    2. Multiple 'content_chunk' documents for each text section.
+    """
+    def __init__(self):
+        self.processor = DocumentProcessor()
+        logger.info("LocalDocxLoader initialized with custom DocumentProcessor.")
+
+    def _create_toc_string(self, nodes: List[Dict], indent: int = 0) -> str:
+        """Helper to create a clean string representation of the TOC for embedding."""
+        parts = []
+        for node in nodes:
+            parts.append("  " * indent + node.get("topic", "Unnamed"))
+            if node.get("subtopics"):
+                parts.append(self._create_toc_string(node["subtopics"], indent + 1))
+        return "\n".join(parts)
+
+    def _flatten_and_create_content_documents(
+        self,
+        nodes: List[Dict[str, Any]],
+        source_filename: str,
+        parent_path: str = ""
+    ) -> Generator[Document, None, None]:
+        """Recursively traverses the content tree and yields 'content_chunk' Documents."""
+        for node in nodes:
+            current_topic = node.get("topic", "Unnamed Section")
+            new_path = f"{parent_path} > {current_topic}" if parent_path else current_topic
+            content = node.get("content")
+
+            if not content:
+                logger.warning(f"No content found for topic '{new_path}' in {source_filename}. Skipping content chunk.")
+            else:
+                yield Document(
+                    page_content=content,
+                    metadata={
+                        "type": "content_chunk",
+                        "source": source_filename,
+                        "topic": current_topic,
+                        "path": new_path,
+                        "page_number": node.get("page_number")
+                    }
+                )
+
+            # Recurse into subtopics
+            subtopics = node.get("subtopics", [])
+            if subtopics:
+                yield from self._flatten_and_create_content_documents(subtopics, source_filename, new_path)
+
     def load(self, data_path: str) -> Generator[Document, None, None]:
+        """Finds .docx files, processes them, and yields Documents of type 'toc' and 'content_chunk'."""
+        logger.info(f"Starting to load and process documents from: {data_path}")
+        if not os.path.isdir(data_path):
+            logger.error(f"Data path '{data_path}' is not a valid directory.")
+            return
+
         for filename in os.listdir(data_path):
-            if filename.endswith(".docx"):
+            if filename.endswith(".docx") and not filename.startswith('~'):
                 file_path = os.path.join(data_path, filename)
-                print(f"Loading document: {file_path}")
-                loader = UnstructuredWordDocumentLoader(file_path, mode="elements")
-                yield from loader.load()
+                logger.info(f"Processing document: {file_path}")
+                try:
+                    with open(file_path, 'rb') as f:
+                        processed_data = self.processor.process(f)
+                    
+                    toc_structure = processed_data.get('toc', [])
+                    content_structure = processed_data.get('content', [])
+
+                    if not toc_structure:
+                        logger.warning(f"No TOC structure found in {filename}. Skipping file.")
+                        continue
+
+                    toc_string_for_embedding = self._create_toc_string(toc_structure)
+                    policy_title = content_structure[0].get("topic") if content_structure else filename
+                    
+                    yield Document(
+                        page_content=toc_string_for_embedding,
+                        metadata={
+                            "type": "toc",
+                            "source": filename,
+                            "policy_title": policy_title,
+                            "full_toc_json": json.dumps(toc_structure)
+                        }
+                    )
+
+                    yield from self._flatten_and_create_content_documents(
+                        nodes=content_structure,
+                        source_filename=filename
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to process {filename}. Error: {e}", exc_info=True)
+                    continue
+
 
 class LocalEmbedder(BaseEmbedder):
     def __init__(self):
