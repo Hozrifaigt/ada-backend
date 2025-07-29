@@ -1,14 +1,17 @@
-generate_summary:
-  name: "Summarize Text"
+summarize_document:
+  name: "Summarize Policy Document for Semantic Search"
   version: 1.0
   template: |
-    You are a helpful assistant who is an expert at summarizing legal and policy documents.
-    Summarize the following text in one or two concise sentences.
-    
+    You are a helpful assistant who is an expert at analyzing legal and policy documents.
+    Analyze the following document text and write a single, dense, and comprehensive paragraph that captures its core meaning, intent, and key topics. This summary will be used to create a vector embedding for semantic search.
+    Focus on the most important themes, concepts, and implications of the text.
+    Avoid unnecessary details or examples, and do not include any personal opinions or interpretations.
+
     TEXT:
     {text}
     
-    SUMMARY:
+    COMPREHENSIVE SUMMARY:
+
 
 generate_keywords:
   name: "Extract Keywords"

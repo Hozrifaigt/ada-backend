@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from app.processing.document_processor import DocumentProcessor
+from app.pipelines.document_processor import DocumentProcessor
 
 logging.basicConfig(level=logging.INFO)
 

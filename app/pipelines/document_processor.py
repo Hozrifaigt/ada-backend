@@ -1,10 +1,9 @@
 import re
-
-from typing import Dict, List, Optional, IO, Any
-from docx import Document
-
-from app.processing.base import PolicyProcessor
 import logging 
+
+from docx import Document
+from typing import Dict, List, Optional, IO, Any
+
 
 logger = logging.getLogger(__name__)
 

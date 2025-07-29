@@ -1,124 +1,112 @@
 import logging
 import asyncio
+from pathlib import Path
 from tqdm.asyncio import tqdm
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from app.pipelines.base import BaseLoader, BaseEmbedder, BaseVectorStore, BaseLLM
+from langchain_core.documents import Document
 
+# Note: We now import the concrete classes, not a base class
+from app.pipelines.components.file_loader import LocalDocxLoader
+from app.pipelines.components.azure_components import AzureEmbedder, AzureVectorStore, AzureLLM
 
 logger = logging.getLogger(__name__)
 
 class IndexingPipeline:
-    """
-    Orchestrates the end-to-end process of loading documents, processing them,
-    and storing them in a vector database for retrieval.
-    
-    This pipeline is asynchronous and relies on component-based abstractions
-    to remain agnostic to the underlying technologies (e.g., local vs. cloud).
-    """
     def __init__(
         self,
-        loader: BaseLoader,
-        embedder: BaseEmbedder,
-        vector_store: BaseVectorStore,
-        llm: BaseLLM,
-        batch_size: int = 64
+        loader: LocalDocxLoader,
+        embedder: AzureEmbedder,
+        vector_store: AzureVectorStore,
+        llm: AzureLLM,
+        batch_size: int = 32
     ):
-        """
-        Initializes the pipeline with all its necessary components and configuration.
-        
-        Args:
-            loader: A component that implements the BaseLoader interface for loading documents.
-            embedder: A component that implements the BaseEmbedder interface for creating vectors.
-            vector_store: A component that implements the BaseVectorStore interface for storage.
-            llm: A component that implements the BaseLLM interface for metadata generation.
-            batch_size: The number of documents to process in each batch.
-        """
         self.loader = loader
         self.embedder = embedder
         self.vector_store = vector_store
         self.llm = llm
         self.batch_size = batch_size
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        
-        logger.info(
-            f"IndexingPipeline initialized with batch_size={self.batch_size} "
-            f"using components: {loader.__class__.__name__}, {embedder.__class__.__name__}, "
-            f"{vector_store.__class__.__name__}, {llm.__class__.__name__}"
-        )
+        logger.info("IndexingPipeline initialized with concrete Azure components.")
 
     def run(self, data_path: str, collection_name: str):
-        """
-        Synchronous entrypoint for the pipeline.
-        This wraps the main asynchronous `arun` method.
-        """
         try:
-            # Use asyncio.run() to execute the main async logic
             asyncio.run(self.arun(data_path, collection_name))
         except Exception as e:
-            logger.critical("The indexing pipeline failed to run to completion.", exc_info=True)
-
+            logger.critical("Indexing pipeline failed to run.", exc_info=True)
 
     async def arun(self, data_path: str, collection_name: str):
-        """
-        The main asynchronous execution logic of the pipeline.
-        """
-        logger.info("Starting Indexing Pipeline Run")
+        logger.info("--- Starting Azure Indexing Pipeline Run ---")
 
         # Step 1: Setup Vector Store
-        logger.info(f"Step 1: Setting up vector store collection: '{collection_name}'")
         self.vector_store.setup(collection_name, self.embedder.vector_size)
 
-        # Step 2: Load Documents
-        logger.info(f"Step 2: Loading documents from source: '{data_path}'")
-        docs = list(self.loader.load(data_path))
-        if not docs:
-            logger.warning("No documents found at the source. Pipeline will exit.")
+        # Step 2: Discover and structure documents
+        file_paths = self.loader.get_file_paths(data_path)
+        if not file_paths:
+            logger.warning("No document files found. Exiting.")
             return
 
+        all_policy_records = []
+        all_content_chunks = []
 
-        logger.info("Step 3: Splitting documents into chunks...")
-        chunks = self.text_splitter.split_documents(docs)
-        total_chunks = len(chunks)
-        logger.info(f"Created {total_chunks} text chunks.")
-        if total_chunks == 0:
-            logger.warning("No text chunks were created after splitting. Pipeline will exit.")
-            return
+        for file_path in tqdm(file_paths, desc="Structuring Documents"):
+            try:
+                structured_data = self.loader.load_and_structure(file_path)
+                
+                # A. Prepare Policy Record (with full text for now)
+                content_by_topic = structured_data.get("content_by_topic", {})
+                full_document_text = "\n\n".join(content_by_topic.values())
+                
+                if not full_document_text:
+                    logger.warning(f"Skipping empty document: {file_path.name}")
+                    continue
 
-        logger.info(f"Step 4 & 5: Processing chunks in batches of {self.batch_size}...")
+                policy_metadata = structured_data.get("metadata", {})
+                policy_metadata.update({"record_type": "policy", "toc": structured_data.get("toc", [])})
+                all_policy_records.append(Document(page_content=full_document_text, metadata=policy_metadata))
+
+                # B. Prepare Content Chunks
+                for topic, text in content_by_topic.items():
+                    chunk_metadata = {"source_filename": policy_metadata.get("filename"), "topic": topic, "record_type": "chunk"}
+                    all_content_chunks.append(Document(page_content=text, metadata=chunk_metadata))
+
+            except Exception as e:
+                logger.error(f"Failed to structure file {file_path}. Skipping.", exc_info=True)
         
-        for i in tqdm(range(0, total_chunks, self.batch_size), desc="Processing Batches"):
-            # A. Get the current batch of chunks
-            batch_chunks = chunks[i : i + self.batch_size]
+        logger.info(f"Created {len(all_policy_records)} policy records and {len(all_content_chunks)} content chunks.")
+        
+        processed_docs = []
+
+        # Step 3A: Process Policy Records individually using Map-Reduce
+        logger.info("Step 3A: Generating summaries for full policy documents...")
+        for policy_record in tqdm(all_policy_records, desc="Summarizing Policies"):
+            try:
+                summary_text = await self.llm.asummarize_document(policy_record)
+                
+                policy_record.page_content = summary_text
+                policy_record.metadata["summary"] = summary_text
+
+                embedding = self.embedder.embed_documents([summary_text])[0]
+                policy_record.metadata['embedding'] = embedding
+                processed_docs.append(policy_record)
+            except Exception as e:
+                logger.error(f"Failed to process policy record {policy_record.metadata['filename']}.", exc_info=True)
+
+        # Step 3B: Process Content Chunks (Sync)
+        logger.info("Step 3B: Generating embeddings for content chunks...")
+        
+        for i in tqdm(range(0, len(all_content_chunks), self.batch_size), desc="Embedding Chunks"):
+            batch_chunks = all_content_chunks[i : i + self.batch_size]
+            
+            # Embed the raw text of the chunks
             page_contents = [chunk.page_content for chunk in batch_chunks]
+            embeddings = self.embedder.embed_documents(page_contents)
 
-            # B. Generate Metadata using the LLM component
-            try:
-                metadatas = await self.llm.ainvoke_batch(page_contents)
-            except Exception as e:
-                logger.error(f"Metadata generation failed for batch starting at index {i}. Skipping batch.", exc_info=True)
-                continue # Move to the next batch
-
-            # C. Combine chunks with their new metadata
-            for j, chunk in enumerate(batch_chunks):
-                # .update() safely adds the new keys ('summary', 'keywords')
-                chunk.metadata.update(metadatas[j])
-
-            # D. Generate embeddings for the batch
-            try:
-                embeddings = self.embedder.embed_documents(page_contents)
-            except Exception as e:
-                logger.error(f"Embedding generation failed for batch starting at index {i}. Skipping batch.", exc_info=True)
-                continue
-
-            # E. Add embeddings to metadata and upsert to vector store
             for j, chunk in enumerate(batch_chunks):
                 chunk.metadata['embedding'] = embeddings[j]
-            
-            try:
-                self.vector_store.upsert(batch_chunks, collection_name)
-                logger.debug(f"Successfully upserted batch starting at index {i}.")
-            except Exception as e:
-                logger.error(f"Upsert failed for batch starting at index {i}.", exc_info=True)
-                # Continue to the next batch
+                processed_docs.append(chunk)
 
+        # Step 4: Upsert All Processed Records
+        logger.info(f"Step 4: Upserting a total of {len(processed_docs)} records.")
+        if processed_docs:
+            self.vector_store.upsert(processed_docs, collection_name)
+        
         logger.info("--- Indexing Pipeline Finished Successfully ---")
