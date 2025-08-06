@@ -17,13 +17,14 @@ class Settings(BaseSettings):
     AZURE_STORAGE_CONNECTION_STRING: str
     AZURE_STORAGE_CONTAINER_NAME: str
 
+    ADMIN_API_KEY: str 
+    PROMPT_MANAGER_PATH: str
+
     DATA_PATH: str
     MAX_WORKERS: int = 1
     BATCH_SIZE: int = 32
-
-    class Config:
-        env_file = "env.dev"
-        env_file_encoding = 'utf-8'
+    LLM_CHUNK_SIZE: int = 10000
+    LLM_CHUNK_OVERLAP: int = 300
 
 
 settings = Settings()

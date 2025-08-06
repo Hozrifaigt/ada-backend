@@ -59,7 +59,6 @@ class DocumentProcessor:
             logger.error(f"Document processing failed: {e}")
             raise ValueError(f"Document processing failed: {e}") from e
 
-
     def _has_toc_styles(self) -> bool:
         """Checks if the document uses formal 'toc' styles."""
         return any(p.style and p.style.name and p.style.name.lower().startswith('toc') for p in self.doc.paragraphs if p.text.strip())
@@ -114,39 +113,64 @@ class DocumentProcessor:
 
         return toc_nodes
 
+
     def _map_content_to_structure(self, toc_structure: List[Dict]) -> List[Dict]:
-        """Maps content using a two-pass strategy to find and assign text between heading landmarks."""
+        """
+        Maps content using a robust two-pass strategy.
+        Pass 1: Identifies the starting paragraph index (landmark) for every topic.
+        Pass 2: Assigns content based on the space between these landmarks.
+        """
         flat_toc = self._flatten_nodes(toc_structure)
         if not flat_toc:
             return toc_structure
 
+        all_paragraphs = self.doc.paragraphs
         landmarks = []
-        topic_lookup = list(flat_toc)
 
-        for i, para in enumerate(self.doc.paragraphs):
+        # --- PASS 1: FIND THE LANDMARKS ---
+        # Create a lookup map for faster matching
+        topic_lookup = {node["topic"]: node for node in flat_toc}
+
+        for i, para in enumerate(all_paragraphs):
             para_text = para.text.strip()
             if not para_text:
                 continue
             
-            for node in topic_lookup:
-                if self._titles_match(para_text, node["topic"]):
+            # Check if this paragraph matches any known topic title
+            for topic_title, node in topic_lookup.items():
+                if self._titles_match(para_text, topic_title):
+                    # We found a landmark! Store the paragraph index and the node.
                     landmarks.append({"index": i, "node": node})
-                    topic_lookup.remove(node)
-                    break 
+                    # Remove from lookup to prevent re-matching (e.g., "Intro" vs "Intro Part 2")
+                    # This assumes titles are unique, which they should be.
+                    del topic_lookup[topic_title]
+                    break # Move to the next paragraph
 
-        landmarks.sort(key=lambda x: x['index'])
-
+        # --- PASS 2: ASSIGN CONTENT BETWEEN LANDMARKS ---
         for i, landmark in enumerate(landmarks):
             current_node = landmark["node"]
             start_index = landmark["index"]
-            is_last = (i + 1) == len(landmarks)
-            end_index = len(self.doc.paragraphs) if is_last else landmarks[i + 1]["index"]
             
-            content_paragraphs = self.doc.paragraphs[start_index:end_index]
-            content_text = "\n".join([p.text for p in content_paragraphs])
+            # Determine the end index. It's the start of the next landmark.
+            is_last_landmark = (i + 1) == len(landmarks)
+            end_index = len(all_paragraphs) if is_last_landmark else landmarks[i + 1]["index"]
+            
+            # The content is all paragraphs between the start and end index.
+            content_paragraphs = all_paragraphs[start_index:end_index]
+            
+            # Join the text of these paragraphs together.
+            content_text = "\n".join([p.text.strip() for p in content_paragraphs if p.text.strip()])
+            
+            # Clean the final content
             current_node["content"] = self._clean_content(content_text)
 
+        # For any topics that were never found as landmarks, mark them.
+        for node in flat_toc:
+            if "content" not in node or not node["content"]:
+                node["content"] = f"Content not found for: {node['topic']}"
+
         return toc_structure
+
 
     #--------------------------------------------------------------------------
     # Private Methods for Heuristic (Fallback) Parsing
@@ -159,8 +183,7 @@ class DocumentProcessor:
         """
         text = paragraph.text.strip()
         
-        # **THE FIX**: A heading should not be a long sentence. This is the most
-        # important guard against the issue you identified.
+
         if len(text.split()) > 25:
             return None
 
@@ -180,7 +203,6 @@ class DocumentProcessor:
         if re.match(r'^Appendix\s[\w\d]+', text, re.IGNORECASE):
             return 1
 
-        # This check is now much safer due to the word count limit above.
         if any(run.font.bold for run in paragraph.runs):
             return 1
         
@@ -263,13 +285,26 @@ class DocumentProcessor:
                     return title.split(sep, 1)[0].strip()
         return title
 
+
     @staticmethod
     def _titles_match(para_text: str, topic_title: str) -> bool:
-        """Robustly checks if a paragraph's text matches a TOC title."""
+        """
+        A more robust function to check if a paragraph's text matches a TOC title.
+        It normalizes both strings by converting to lowercase, stripping leading numbers
+        and punctuation, and removing extra whitespace. This allows for flexible matching.
+        """
+        # Normalize the text from the paragraph in the document's body
+        # This strips leading list markers like "1.", "1.1.", "A.", etc.
         norm_para = re.sub(r'^[\w\d.\s]+\s', '', para_text, count=1).lower().strip()
-        # The topic title from the TOC is already clean, so just lowercase it.
-        norm_topic = topic_title.lower().strip()
+        
+        # Normalize the title from the Table of Contents
+        norm_topic = re.sub(r'^[\w\d.\s]+\s', '', topic_title, count=1).lower().strip()
+
+        # Sometimes the body heading is just the raw title without numbering
         raw_para_norm = para_text.lower().strip()
+
+        # A match occurs if the normalized titles are the same,
+        # or if the raw paragraph text matches the normalized TOC title.
         return norm_para == norm_topic or raw_para_norm == norm_topic
 
     @staticmethod

@@ -1,7 +1,8 @@
 import os
 import json
 import logging
-from app.pipelines.document_processor import DocumentProcessor
+from app.pipelines.components.file_loader import LocalDocxLoader
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 
@@ -9,13 +10,16 @@ def test_process_file(path: str):
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
 
-    processor = DocumentProcessor()
+    processor = LocalDocxLoader()
 
-    with open(path, "rb") as f:
-        result = processor.process(f)
+    # with open(path, "rb") as f:
+    #     result = processor.process(f)
 
-    print(json.dumps(result["toc"], indent=2))
-    print(json.dumps(result["content"], indent=2, ensure_ascii=False))
+    structured_data = processor.load_and_structure(path)
+
+    print(json.dumps(structured_data, indent=2))
+    # print(json.dumps(result["content"], indent=2, ensure_ascii=False))
 
 if __name__ == "__main__":
-    test_process_file("data/client_data/Dimah Capital_Variable Remuneration and Reward Policy & Procedures Manual.docx")
+    file_path = Path("data/client_data/Dimah Capital_Variable Remuneration and Reward Policy & Procedures Manual.docx")
+    test_process_file(file_path)

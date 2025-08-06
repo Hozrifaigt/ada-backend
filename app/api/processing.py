@@ -1,7 +1,7 @@
 import logging
 from starlette import status
 from starlette.responses import JSONResponse
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks
 from app.pipelines.pipeline_trigger import run_indexing_pipeline
 
 logger = logging.getLogger(__name__)
