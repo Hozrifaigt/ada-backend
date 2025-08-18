@@ -16,24 +16,21 @@ class AzureEmbedder:
             azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
             api_key=settings.AZURE_OPENAI_KEY,
         )
-        logger.info("AzureEmbedder initialized with REAL Azure OpenAI embeddings")
+        logger.info("AzureEmbedder initialized with Azure OpenAI embeddings")
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
-        logger.info(f"Generating REAL embeddings for {len(texts)} texts")
+        logger.info(f"Generating embeddings for {len(texts)} texts")
         
         try:
             embeddings = self.client.embed_documents(texts)
-            logger.info(f"Successfully generated {len(embeddings)} real embeddings")
+            logger.info(f"Successfully generated {len(embeddings)} embeddings")
             return embeddings
             
         except Exception as e:
-            logger.error(f"Failed to generate embeddings: {e}")
-            # Fallback to prevent complete failure (optional)
-            logger.warning("Falling back to zero vectors due to embedding failure")
-            vector_size = settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS
-            return [[0.0] * vector_size for _ in texts]
+            logger.error(f"Failed to generate embedding: {e}")
+            raise RuntimeError("Embedding generation failed") from e
     
     def embed_query(self, text: str) -> List[float]:
         logger.debug(f"Generating embedding for query: '{text[:50]}...'")
@@ -44,8 +41,5 @@ class AzureEmbedder:
             return embedding
             
         except Exception as e:
-            logger.error(f"Failed to generate query embedding: {e}")
-            # Fallback to prevent complete failure (optional)
-            logger.warning("Falling back to zero vector due to embedding failure")
-            vector_size = settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS
-            return [0.0] * vector_size
+            logger.error(f"Failed to generate embedding: {e}")
+            raise RuntimeError("Embedding generation failed") from e

@@ -22,11 +22,13 @@ class AzureLLM:
         
         self.prompt_manager = prompt_manager
         self.summarize_prompt = prompt_manager.get_prompt("summarize_document")
-        
+        self.chunk_size = settings.LLM_CHUNK_SIZE
+
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.LLM_CHUNK_SIZE,
+            chunk_size=self.chunk_size,
             chunk_overlap=settings.LLM_CHUNK_OVERLAP
         )
+
         
         logger.info("Production AzureLLM initialized with custom prompts")
     
@@ -36,9 +38,9 @@ class AzureLLM:
             return "No content to summarize"
 
         try:
-            if len(text.split()) <= settings.LLM_CHUNK_SIZE:
+            if len(text.split()) <= self.chunk_size:
                 return await self._summarize_text(text)
-            return await self._recursive_summarize(text)
+            return await self._recursive_summarize(text, self.chunk_size)
                 
         except Exception as e:
             logger.error(f"Summarization failed: {e}")
@@ -61,8 +63,8 @@ class AzureLLM:
     async def _recursive_summarize(self, text: str, max_chunk_size: int = None) -> str:
         """Recursively summarize text by chunking and combining summaries."""
         if max_chunk_size is None:
-            max_chunk_size = settings.LLM_CHUNK_SIZE
-            
+            max_chunk_size = self.chunk_size
+
         try:
             # Split into chunks
             docs = self.text_splitter.create_documents([text])
@@ -71,11 +73,9 @@ class AzureLLM:
             if len(docs) == 1:
                 return await self._summarize_text(docs[0].page_content)
  
-            # Summarize each chunk concurrently
             tasks = [self._summarize_text(chunk_doc.page_content) for chunk_doc in docs]
             chunk_summaries = await asyncio.gather(*tasks) [2, 1]
 
-            # Combine all chunk summaries
             combined_summaries = " ".join(chunk_summaries)
             
             # If combined summaries are still too long, recursively summarize again
@@ -83,7 +83,6 @@ class AzureLLM:
                 logger.info(f"Combined summaries too long ({len(combined_summaries)} chars), recursing...")
                 return await self._recursive_summarize(combined_summaries, max_chunk_size)
             else:
-                # Final summarization
                 logger.info("Final summarization of combined summaries")
                 return await self._summarize_text(combined_summaries)
             

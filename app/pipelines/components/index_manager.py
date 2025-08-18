@@ -1,5 +1,10 @@
 import logging
+
+from app.config.settings import settings
 from typing import Dict, Any, Optional, List
+
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import ResourceNotFoundError
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchIndex,
@@ -13,21 +18,15 @@ from azure.search.documents.indexes.models import (
     SemanticConfiguration,
     SemanticSearch,
     SemanticField,
-    SemanticPrioritizedFields,
-    ComplexField
+    SemanticPrioritizedFields
 )
-from azure.core.credentials import AzureKeyCredential
-from azure.core.exceptions import ResourceNotFoundError
-
-from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 class AzureSearchIndexManager:
     """Manages Azure Search index creation and schema for RAG system."""
-    
-    def __init__(self, index_name: Optional[str] = None):
-        # Use provided index name or fall back to settings default
+
+    def __init__(self, index_name: Optional[str] = None):        
         self.index_name = index_name or settings.AZURE_SEARCH_INDEX_NAME
         self.index_client = SearchIndexClient(
             endpoint=settings.AZURE_SEARCH_ENDPOINT,
@@ -76,22 +75,21 @@ class AzureSearchIndexManager:
                     name="description_vector",
                     type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
                     searchable=True,
-                    vector_search_dimensions=1536,
+                    vector_search_dimensions=settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS,
                     vector_search_profile_name="default-vector-profile"
                 ),
                 SearchField(
                     name="content_vector", 
                     type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
                     searchable=True,
-                    vector_search_dimensions=1536,
+                    vector_search_dimensions=settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS,
                     vector_search_profile_name="default-vector-profile"
                 ),
                 
-                # TOC field as complex object - FIX: Change to store structured data
                 SimpleField(name="toc", type=SearchFieldDataType.String, searchable=False, filterable=False)
             ]
             
-            # Configure vector search
+            # Indexing Method
             vector_search = VectorSearch(
                 algorithms=[
                     HnswAlgorithmConfiguration(name="default-hnsw-algorithm")
@@ -200,36 +198,19 @@ class AzureSearchIndexManager:
         else:
             logger.error("Failed to delete index, cannot recreate")
             return False
-    
-    def list_all_indexes(self) -> List[str]:
-        """List all indexes in the Azure Search service."""
-        try:
-            indexes = self.index_client.list_indexes()
-            index_names = [index.name for index in indexes]
-            logger.info(f"Found {len(index_names)} indexes: {index_names}")
-            return index_names
-        except Exception as e:
-            logger.error(f"Failed to list indexes: {e}")
-            return []
 
 def main():
-    """Main function to run index management."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     manager = AzureSearchIndexManager()
     
-    # Check if index exists and create if needed
     if manager.ensure_index_exists():
-        print("Index is ready!")
-        
-        # Show index stats
         stats = manager.get_index_stats()
         if stats:
-            print(f"📊 Index has {stats['field_count']} fields")
-            print(f"🔍 Vector search: {'✅' if stats['vector_search_enabled'] else '❌'}")
-            print(f"🔍 Semantic search: {'✅' if stats['semantic_search_enabled'] else '❌'}")
+            logger.info(f"Index '{stats['name']}' statistics:")
+            logger.info(f"Vector search:  {stats.get('vector_search_enabled', 'None')} ")
+            logger.info(f"Semantic search:  {stats.get('semantic_search_enabled', 'None')} ")
     else:
-        print("❌ Failed to create RAG index")
+        logger.error("Failed to create RAG index")
 
 if __name__ == "__main__":
     main()
