@@ -1,9 +1,6 @@
-/app/**/__pycache__/
-/app/*.pyc
-/app/data/
-
-/env/*
-
-# Local data / caches
-data/
+**/__pycache__/
 *.pyc
+
+/app/data/
+data/
+/env/*
