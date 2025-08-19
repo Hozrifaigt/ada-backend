@@ -25,3 +25,26 @@ generate_keywords:
     {text}
     
     KEYWORDS:
+
+generate_policy_content:
+  name: "Generate Policy Content"
+  version: 1.0
+  template: |
+    You are an AI assistant helping to generate policy content based on existing policy templates and user requirements.
+
+    EXISTING POLICY CONTENT FOR REFERENCE:
+    {topic_content}
+
+    USER REQUEST:
+    {user_query}
+
+    Please generate improved or customized policy content that addresses the user's request while building upon the existing policy content provided above. 
+    
+    Ensure the response is:
+    1. Professional and appropriate for policy documentation
+    2. Consistent with the structure and tone of the existing content
+    3. Responsive to the specific user request
+    4. Clear and actionable
+    5. Properly formatted with headers and bullet points where appropriate
+
+    GENERATED POLICY CONTENT:
