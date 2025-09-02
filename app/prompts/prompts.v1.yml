@@ -13,19 +13,6 @@ summarize_document:
     COMPREHENSIVE SUMMARY:
 
 
-generate_keywords:
-  name: "Extract Keywords"
-  version: 1.0
-  template: |
-    You are an expert at identifying key themes in policy documents.
-    Extract the 5 most important and relevant keywords from the following text.
-    Return them as a comma-separated list.
-    
-    TEXT:
-    {text}
-    
-    KEYWORDS:
-
 generate_policy_content:
   name: "Generate Policy Content"
   version: 1.0
@@ -46,5 +33,30 @@ generate_policy_content:
     3. Responsive to the specific user request
     4. Clear and actionable
     5. Properly formatted with headers and bullet points where appropriate
+
+    GENERATED POLICY CONTENT:
+
+generate_from_empty:
+  name: "Generate Policy From Empty Topic"
+  version: 1.0
+  template: |
+    You are an AI assistant helping to generate policy content for a topic that has no existing content.
+
+    TOPIC: {topic_name}
+
+    USER REQUEST: {user_query}
+
+    Since there is no existing content for this topic, please generate comprehensive policy content based on:
+    1. The topic name and what it typically covers in organizational policies
+    2. Industry best practices and standards
+    3. Common regulatory requirements
+    4. The user's specific request
+
+    Ensure the response is:
+    1. Professional and appropriate for policy documentation
+    2. Comprehensive and well-structured
+    3. Based on common organizational needs
+    4. Clear and actionable
+    5. Properly formatted with headers and sections
 
     GENERATED POLICY CONTENT:
