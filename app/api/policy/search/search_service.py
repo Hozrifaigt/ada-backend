@@ -18,26 +18,36 @@ class SearchService:
         topic_id: str,
         store: AzureVectorStore
     ) -> List[Dict[str, Any]]:
-        """Search for chunks by policy and topic."""
+        """Search for topics by policy and topic ID."""
         try:
-            filter_string = f"record_type eq 'chunk' and id eq '{topic_id}'" # source eq '{policy_id}' and
+            filter_string = f"record_type eq 'topic' and id eq '{topic_id}'"
             
-            logger.debug(f"Searching chunks with filter: {filter_string}")
+            logger.debug(f"Searching topics with filter: {filter_string}")
             
             results = list(store.search_client.search(
                 search_text="*",
                 filter=filter_string,
-                select="topic,content,source",
+                select="topic,topic_content,source",
                 top=10
             ))
             
-            return results
+            # Map the new structure to expected format
+            mapped_results = []
+            for result in results:
+                mapped_results.append({
+                    "id": result.get("id"),
+                    "topic": result.get("topic"),
+                    "content": result.get("topic_content"),  # Map topic_content to content
+                    "source": result.get("source")
+                })
+            
+            return mapped_results
             
         except Exception as e:
-            logger.error(f"Failed to search chunks: {e}")
+            logger.error(f"Failed to search topics: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to search chunks: {str(e)}"
+                detail=f"Failed to search topics: {str(e)}"
             )
     
     @staticmethod
@@ -53,18 +63,28 @@ class SearchService:
             vector_query = VectorizedQuery(
                 vector=query_vector,
                 k_nearest_neighbors=top_k,
-                fields="content_vector"
+                fields="topic_content_vector"
             )
             
             results = list(store.search_client.search(
                 search_text=query,
                 vector_queries=[vector_query],
-                filter=f"record_type eq 'chunk'",
-                select="topic,content,source",
+                filter=f"record_type eq 'topic'",
+                select="topic,topic_content,source,id",
                 top=top_k
             ))
             
-            return results
+            # Map the new structure to expected format
+            mapped_results = []
+            for result in results:
+                mapped_results.append({
+                    "id": result.get("id"),
+                    "topic": result.get("topic"),
+                    "content": result.get("topic_content"),  # Map topic_content to content
+                    "source": result.get("source")
+                })
+            
+            return mapped_results
             
         except Exception as e:
             logger.error(f"Semantic search failed: {e}")

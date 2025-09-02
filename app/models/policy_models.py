@@ -1,8 +1,5 @@
-import re
-
 from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Any, Optional
-
 
 
 class SimilarPolicyRequest(BaseModel):
@@ -23,10 +20,12 @@ class PolicyMatch(BaseModel):
     threshold_used: float
     source: str
 
-class ChunkInfo(BaseModel):
-    """Chunk information"""
-    chunk_id: str
-    chunk_content: str
+class TopicInfo(BaseModel):
+    """Information about a topic and its subtopics."""
+    topic_id: str
+    topic_name: str
+    topic_content: str
+    subtopics: List[Dict[str, Any]]  # List of subtopic objects with id, name, content
 
 class PoliciesListResponse(BaseModel):
     """Response for getting all policies."""
@@ -34,18 +33,11 @@ class PoliciesListResponse(BaseModel):
     policies: List[Dict[str, Any]]
 
 class PolicyGenerationRequest(BaseModel):
-    """Request for generating policy content - simplified as requested."""
+    """Request for generating policy content - simplified."""
     user_query: str = Field(..., min_length=1, max_length=5000)
-    policy_id: str = Field(..., min_length=1, max_length=200)
-    topic_id: str = Field(..., min_length=1, max_length=500)
-    subtopic_id: Optional[str] = Field(None, max_length=500)
-    
-    @validator('policy_id')
-    def validate_policy_id(cls, v):
-        if not re.match(r'^[a-zA-Z0-9_.-]+$', v):
-            raise ValueError('Policy ID contains invalid characters')
-        return v
+    topic_id: str = Field(..., min_length=1, max_length=200)
+    subtopic_id: Optional[str] = Field(None, max_length=200)
 
 class PolicyGenerationResponse(BaseModel):
-    """Response from policy generation - simplified as requested."""
+    """Response from policy generation."""
     response: str

@@ -1,4 +1,4 @@
 from .policy_service import PolicyService
-from .chunk_service import ChunkService
+from .topic_service import TopicService
 
-__all__ = ["PolicyService", "ChunkService"]
+__all__ = ["PolicyService", "TopicService"]

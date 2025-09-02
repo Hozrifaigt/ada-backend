@@ -1,5 +1,8 @@
 import logging
 import asyncio
+import json
+import uuid
+from typing import List, Dict, Any
 
 from tqdm.asyncio import tqdm
 from app.pipelines.components.llm import AzureLLM
@@ -11,7 +14,8 @@ from app.pipelines.components.vector_store import AzureVectorStore
 logger = logging.getLogger(__name__)
 
 class IndexingPipeline:
-    """Production-ready indexing pipeline optimized for RAG systems."""
+    """Simplified indexing pipeline - only embeds policy descriptions."""
+    
     def __init__(
         self,
         loader: LocalDocxLoader,
@@ -25,7 +29,7 @@ class IndexingPipeline:
         self.vector_store = vector_store
         self.llm = llm
         self.batch_size = batch_size
-        logger.info("Production IndexingPipeline initialized")
+        logger.info("Simplified IndexingPipeline initialized (no topic embeddings)")
 
     def run(self, data_path: str, collection_name: str):
         """Run pipeline synchronously."""
@@ -36,8 +40,8 @@ class IndexingPipeline:
             raise
 
     async def arun(self, data_path: str, collection_name: str):
-        """Main production pipeline execution."""
-        logger.info("=== Starting Production RAG Indexing Pipeline ===")
+        """Main pipeline execution - simplified without topic embeddings."""
+        logger.info("=== Starting Simplified RAG Indexing Pipeline ===")
         
         # Step 1: Load and structure documents
         logger.info("Step 1: Loading and structuring documents")
@@ -47,74 +51,84 @@ class IndexingPipeline:
             return
         
         all_policy_docs = []
-        all_chunk_docs = []
+        all_topic_docs = []
         
         for file_path in tqdm(file_paths, desc="Processing files"):
             try:
+                # Process document using new structure
                 structured_data = self.loader.load_and_structure(file_path)
                 
-                # Extract basic info
-                content_by_topic = structured_data.get("content_by_topic", {})
-                full_text = "\n\n".join(content_by_topic.values())
+                # Extract components
+                toc = structured_data.get("toc", [])
+                topics = structured_data.get("topics", [])
+                full_text = structured_data.get("full_text", "")
+                metadata = structured_data.get("metadata", {})
                 
                 if not full_text.strip():
                     logger.warning(f"Empty document: {file_path.name}")
                     continue
                 
-                metadata = structured_data.get("metadata", {})
-                topic_hierarchy = structured_data.get("topic_hierarchy", {})
+                # Process topic documents (no embeddings needed)
+                policy_id = str(uuid.uuid4())
+                processed_topic_docs = []
                 
-                # FIX: Create proper policy document structure
-                policy_doc = {
-                    "filename": file_path.name,  # Add filename field
-                    "source": str(file_path),    # Keep full path as source
-                    "full_text": full_text,      # Will be replaced with summary
-                    "toc": structured_data.get("toc", []),
-                }
-                all_policy_docs.append(policy_doc)
-                
-                # Create chunk documents
-                for topic, text in content_by_topic.items():
-                    if not text.strip():
-                        continue
-                    
-                    hierarchy_info = topic_hierarchy.get(topic, {})
-                    
-                    chunk_doc = {
-                        "content": text,
+                for topic_data in topics:
+                    # Simply create topic document without embeddings
+                    topic_doc = {
+                        "id": topic_data["id"],
+                        "policy_id": policy_id,
                         "source": str(file_path),
-                        "topic": topic,
-                        "level": hierarchy_info.get("level", 1),
-                        "parent_topic": hierarchy_info.get("parent_topic"),
-                        "is_subtopic": hierarchy_info.get("is_subtopic", False)
+                        "topic": topic_data["topic"],
+                        "topic_content": topic_data.get("topic_content", ""),
+                        "subtopics": json.dumps(topic_data.get("subtopics", []))  # Store as JSON string
                     }
-                    all_chunk_docs.append(chunk_doc)
+                    processed_topic_docs.append(topic_doc)
+                
+                # Store topic IDs for policy reference
+                topic_ids = [doc["id"] for doc in processed_topic_docs]
+                
+                # Create policy document (will add embedding later)
+                policy_doc = {
+                    "id": policy_id,
+                    "filename": file_path.name,
+                    "source": str(file_path),
+                    "full_text": full_text,  # Temporary, for summary generation
+                    "toc": toc,
+                    "topic_ids": topic_ids,
+                    "num_topics": metadata.get("num_topics", 0)
+                }
+                
+                all_policy_docs.append(policy_doc)
+                all_topic_docs.extend(processed_topic_docs)
+                
+                logger.info(f"Processed {file_path.name}: {len(processed_topic_docs)} topics")
                     
             except Exception as e:
                 logger.error(f"Failed to process {file_path}: {e}")
         
-        logger.info(f"Loaded {len(all_policy_docs)} policies and {len(all_chunk_docs)} chunks")
+        logger.info(f"Loaded {len(all_policy_docs)} policies with {len(all_topic_docs)} total topics")
         
-        # Step 2: Generate summaries for policy documents
-        logger.info("Step 2: Generating LLM summaries for policy documents")
+        # Step 2: Generate summaries and embeddings for policy documents ONLY
+        logger.info("Step 2: Generating policy summaries and embeddings")
         
         for policy_doc in tqdm(all_policy_docs, desc="Summarizing policies"):
             try:
-                file_path = policy_doc["source"]
-                full_text = policy_doc["full_text"]
-                
-                logger.info(f"Direct summarization for {file_path} ({len(text.split())} words)")
+                # Generate summary
+                full_text = policy_doc.pop("full_text")  # Remove full text after using
+                logger.info(f"Generating summary for {policy_doc['filename']}")
                 summary = await self.llm.asummarize_document(full_text)
                 
                 policy_doc["description"] = summary
-                policy_doc.pop("full_text")
+                
+                # Generate embedding for policy summary ONLY
+                policy_doc["description_vector"] = self.embedder.embed_query(summary)
                 
                 logger.info(f"Summarized {policy_doc['filename']}: {len(summary)} chars")
                 
             except Exception as e:
                 logger.error(f"Failed to summarize {policy_doc.get('filename', 'unknown')}: {e}")
-                policy_doc["description"] = policy_doc.get("full_text", "")[:1000] + "..."
-                policy_doc.pop("full_text", None)
+                policy_doc["description"] = "Summary generation failed"
+                policy_doc["description_vector"] = self.embedder.embed_query("Summary generation failed")
         
         # Step 3: Store policy documents in Azure Search
         logger.info("Step 3: Storing policy documents in Azure Search")
@@ -123,19 +137,16 @@ class IndexingPipeline:
         if not policy_success:
             logger.error("Failed to store some policy documents")
         
-        # Step 4: Store chunk documents in Azure Search
-        logger.info("Step 4: Storing chunk documents in Azure Search")
-        chunk_success = self.vector_store.upsert_chunk_documents(all_chunk_docs)
+        # Step 4: Store topic documents in Azure Search (no embeddings)
+        logger.info("Step 4: Storing topic documents in Azure Search")
+        topic_success = self.vector_store.upsert_topic_documents(all_topic_docs)
         
-        if not chunk_success:
-            logger.error("Failed to store some chunk documents")
+        if not topic_success:
+            logger.error("Failed to store some topic documents")
         
-
-        if policy_success and chunk_success:
-            logger.info("=== Pre-Processing Pipeline Completed Successfully ===")
-            logger.info(f"Stored {len(all_policy_docs)} policies and {len(all_chunk_docs)} chunks")
+        if policy_success and topic_success:
+            logger.info("=== Simplified Pipeline Completed Successfully ===")
+            logger.info(f"Stored {len(all_policy_docs)} policies and {len(all_topic_docs)} topics")
+            logger.info("Note: Only policy descriptions have embeddings for similarity search")
         else:
             logger.warning("=== Pipeline completed with some errors ===")
-        
-
-        logger.info("RAG System Ready! Available capabilities:")

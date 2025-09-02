@@ -35,10 +35,10 @@ class PolicyService:
 
     @staticmethod
     async def get_chunks_by_policy(policy_id: str, store: AzureVectorStore) -> List[ChunkDetail]:
-        """Retrieve all chunks for a specific policy."""
-        logger.info(f"Fetching all chunks for policy: '{policy_id}'")
+        """Retrieve all topics for a specific policy."""
+        logger.info(f"Fetching all topics for policy: '{policy_id}'")
         try:
-            filter_string = f"record_type eq 'chunk' and source eq '{policy_id}'"
+            filter_string = f"record_type eq 'topic' and source eq '{policy_id}'"
             results = await store.client.asimilarity_search(
                 query="*",
                 k=300,
@@ -132,7 +132,7 @@ class PolicyGenerationService:
     @staticmethod
     async def _get_topic_content(policy_id: str, topic: str, store: AzureVectorStore) -> str:
         """Retrieve content for a specific topic from a policy."""
-        filter_string = f"record_type eq 'chunk' and source eq '{policy_id}' and topic eq '{topic}'"
+        filter_string = f"record_type eq 'topic' and source eq '{policy_id}' and topic eq '{topic}'"
         
         logger.info(f"Searching for content with filter: {filter_string}")
         

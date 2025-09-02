@@ -1,20 +1,42 @@
 import re
-import logging 
-
+import json
+import logging
 from docx import Document
-from typing import Dict, List, Optional, IO, Any
-
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+from typing import Dict, List, Optional, Tuple, Any, IO
+from dataclasses import dataclass, field
+from pathlib import Path
+from io import BytesIO
+import uuid
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class TOCEntry:
+    """Simplified TOC entry for document processing"""
+    level: int
+    title: str
+    content: str = ""
+    children: List['TOCEntry'] = field(default_factory=list)
+    source_method: str = ""
+    para_index: Optional[int] = None
+    has_content: bool = False
+    
+    def to_dict(self) -> Dict:
+        return {
+            'level': self.level,
+            'title': self.title,
+            'content': self.content[:500] + '...' if len(self.content) > 500 else self.content,
+            'children': [child.to_dict() for child in self.children],
+            'has_content': self.has_content,
+            'source_method': self.source_method
+        }
+
 class DocumentProcessor:
     """
-    Processes Word (.docx) documents to extract a structured Table of Contents (TOC)
-    and map the corresponding content hierarchically. It can operate using formal
-    TOC styles or fall back to a heuristic-based approach for documents without them.
-    
-    The processor is designed to read from a file stream, making it suitable for
-    use in web applications and data processing pipelines.
+    Production-ready document processor optimized for RAG systems.
+    Extracts hierarchical structure and prepares content for Azure Search indexing.
     """
     
     def __init__(self, config: Optional[Dict] = None):
@@ -24,317 +46,382 @@ class DocumentProcessor:
 
     def process(self, file_stream: IO[bytes]) -> Dict[str, Any]:
         """
-        Main processing method. Orchestrates the parsing of the document stream.
-
-        Args:
-            file_stream: A file-like object (byte stream) of the .docx file.
+        Main processing method that extracts and structures document content.
         
         Returns:
-            A dictionary with 'toc' and 'content' keys. The 'toc' contains only
-            the nested topic structure, while 'content' contains the topics
-            along with their full extracted text.
-            
-        Raises:
-            ValueError: If the document stream cannot be processed.
+            Dictionary containing:
+            - toc: Hierarchical table of contents
+            - topics: List of topic objects ready for indexing
+            - metadata: Document metadata
         """
         try:
             self.doc = Document(file_stream)
             
-            if self._has_toc_styles():
-                logger.info("Strategy: Found formal TOC styles. Parsing from TOC.")
-                toc_structure = self._build_structure_from_toc_styles()
-                nested_content = self._map_content_to_structure(toc_structure)
-            else:
-                logger.info("Strategy: No formal TOC. Using heuristic parsing on document body.")
-                flat_list = self._extract_sections_to_flat_list_from_body()
-                nested_content = self._build_nested_content_tree(flat_list)
+            # Step 1: Try to extract from TOC styles (if they exist)
+            toc_entries = self._extract_from_toc_styles()
             
-            toc_only = self._create_toc_from_content_tree(nested_content)
-
+            # Step 2: If no TOC found, extract from document body
+            if not toc_entries:
+                logger.info("No formal TOC found, extracting from document structure")
+                toc_entries = self._extract_from_document_body()
+            
+            # Step 3: Build hierarchy
+            hierarchical_toc = self._build_hierarchy(toc_entries)
+            
+            # Step 4: Prune empty topics (less than 30 words with no children)
+            pruned_hierarchical_toc = self._prune_empty_topics(hierarchical_toc)
+            
+            # Step 5: Convert to topic documents for indexing
+            topic_documents = self._create_topic_documents(pruned_hierarchical_toc)
+            
+            # Step 6: Get full text for policy summary
+            full_text = self._get_full_text()
+            
             return {
-                "toc": toc_only,
-                "content": nested_content
+                "toc": self._create_simple_toc(pruned_hierarchical_toc),
+                "topics": topic_documents,
+                "full_text": full_text,
+                "metadata": {
+                    "num_topics": len(topic_documents),
+                    "extraction_method": toc_entries[0].source_method if toc_entries else "none"
+                }
             }
+            
         except Exception as e:
             logger.error(f"Document processing failed: {e}")
             raise ValueError(f"Document processing failed: {e}") from e
 
-    def _has_toc_styles(self) -> bool:
-        """Checks if the document uses formal 'toc' styles."""
-        return any(p.style and p.style.name and p.style.name.lower().startswith('toc') for p in self.doc.paragraphs if p.text.strip())
+    def _is_toc_header(self, para: Paragraph) -> bool:
+        """Checks if a paragraph is a likely 'Table of Contents' header."""
+        text = para.text.strip().lower()
+        toc_keywords = ['table of contents', 'contents', 'index']
+        return text in toc_keywords
 
-    def _build_structure_from_toc_styles(self) -> List[Dict]:
-        """Parses the document's 'toc' styles to get the exact hierarchy and titles."""
-        toc_nodes: List[Dict] = []
-        parent_finder = {0: {"subtopics": toc_nodes}}
+    def _extract_from_toc_styles(self) -> List[TOCEntry]:
+        """Extracts TOC entries from formal TOC styles."""
+        toc_entries = []
         
-        for para in self.doc.paragraphs:
-            style_name = para.style.name.lower() if para.style else ""
-            if not style_name.startswith('toc '):
-                continue
+        # Attempt 1: Find an explicit TOC header and extract entries after it
+        toc_start_index = -1
+        for i, para in enumerate(self.doc.paragraphs):
+            if self._is_toc_header(para):
+                toc_start_index = i
+                break
+        
+        if toc_start_index != -1:
+            logger.info("Formal TOC header found. Collecting entries after this point.")
+            for para in self.doc.paragraphs[toc_start_index + 1:]:
+                is_toc_style = para.style and para.style.name and 'toc' in para.style.name.lower()
+                if is_toc_style:
+                    text = para.text.strip()
+                    if text:
+                        title = re.sub(r'\.+\s*\d+\s*$', '', text).strip()
+                        level_match = re.search(r'toc\s*(\d+)', para.style.name.lower())
+                        level = int(level_match.group(1)) if level_match else 1
+                        if title:
+                            toc_entries.append(TOCEntry(level=level, title=title, source_method="formal_toc"))
+                elif toc_entries and para.text.strip():
+                    break
+        
+        # Attempt 2: If no TOC header found, find any 'toc' styled paragraph
+        if not toc_entries:
+            logger.info("No explicit TOC header found. Looking for any 'toc' styled paragraphs.")
+            for para in self.doc.paragraphs:
+                is_toc_style = para.style and para.style.name and 'toc' in para.style.name.lower()
+                if is_toc_style:
+                    text = para.text.strip()
+                    if text:
+                        title = re.sub(r'\.+\s*\d+\s*$', '', text).strip()
+                        level_match = re.search(r'toc\s*(\d+)', para.style.name.lower())
+                        level = int(level_match.group(1)) if level_match else 1
+                        if title:
+                            toc_entries.append(TOCEntry(level=level, title=title, source_method="formal_toc"))
+        
+        # Map content to TOC entries if found
+        if toc_entries:
+            self._map_content_to_toc_entries(toc_entries)
+        
+        return toc_entries
 
+    def _extract_from_document_body(self) -> List[TOCEntry]:
+        """Extract headings from document body using reliable methods."""
+        toc_entries = []
+        current_content = []
+        last_entry = None
+        
+        for i, para in enumerate(self.doc.paragraphs):
             text = para.text.strip()
             if not text:
                 continue
+            
+            is_heading, level = self._is_heading(para)
+            if is_heading:
+                if last_entry and current_content:
+                    last_entry.content = '\n'.join(current_content).strip()
+                    last_entry.has_content = bool(last_entry.content)
+                    current_content = []
                 
-            try:
-                level = int(style_name.split(' ')[-1])
-            except (ValueError, IndexError):
-                continue
-
-            parts = text.rsplit('\t', 1)
-            raw_title = parts[0]
-            page_number = None
-
-            if len(parts) == 2:
-                page_num_str = ''.join(filter(str.isdigit, parts[1]))
-                if page_num_str:
-                    page_number = int(page_num_str)
-            
-            title = self._get_clean_title(raw_title)
-            
-            if not title:
-                continue
-            
-            new_node = {
-                "topic": title, 
-                "page_number": page_number, 
-                "subtopics": [], 
-                "content": ""
-            }
-            
-            parent_level = level - 1
-            while parent_level not in parent_finder and parent_level >= 0:
-                parent_level -= 1
-            
-            parent_node = parent_finder[parent_level]
-            parent_node["subtopics"].append(new_node)
-            parent_finder[level] = new_node
-
-        return toc_nodes
-
-
-    def _map_content_to_structure(self, toc_structure: List[Dict]) -> List[Dict]:
-        """
-        Maps content using a robust two-pass strategy.
-        Pass 1: Identifies the starting paragraph index (landmark) for every topic.
-        Pass 2: Assigns content based on the space between these landmarks.
-        """
-        flat_toc = self._flatten_nodes(toc_structure)
-        if not flat_toc:
-            return toc_structure
-
-        all_paragraphs = self.doc.paragraphs
-        landmarks = []
-
-        # --- PASS 1: FIND THE LANDMARKS ---
-        # Create a lookup map for faster matching
-        topic_lookup = {node["topic"]: node for node in flat_toc}
-
-        for i, para in enumerate(all_paragraphs):
-            para_text = para.text.strip()
-            if not para_text:
-                continue
-            
-            # Check if this paragraph matches any known topic title
-            for topic_title, node in topic_lookup.items():
-                if self._titles_match(para_text, topic_title):
-                    # We found a landmark! Store the paragraph index and the node.
-                    landmarks.append({"index": i, "node": node})
-                    # Remove from lookup to prevent re-matching (e.g., "Intro" vs "Intro Part 2")
-                    # This assumes titles are unique, which they should be.
-                    del topic_lookup[topic_title]
-                    break # Move to the next paragraph
-
-        # --- PASS 2: ASSIGN CONTENT BETWEEN LANDMARKS ---
-        for i, landmark in enumerate(landmarks):
-            current_node = landmark["node"]
-            start_index = landmark["index"]
-            
-            # Determine the end index. It's the start of the next landmark.
-            is_last_landmark = (i + 1) == len(landmarks)
-            end_index = len(all_paragraphs) if is_last_landmark else landmarks[i + 1]["index"]
-            
-            # The content is all paragraphs between the start and end index.
-            content_paragraphs = all_paragraphs[start_index:end_index]
-            
-            # Join the text of these paragraphs together.
-            content_text = "\n".join([p.text.strip() for p in content_paragraphs if p.text.strip()])
-            
-            # Clean the final content
-            current_node["content"] = self._clean_content(content_text)
-
-        # For any topics that were never found as landmarks, mark them.
-        for node in flat_toc:
-            if "content" not in node or not node["content"]:
-                node["content"] = f"Content not found for: {node['topic']}"
-
-        return toc_structure
-
-
-    #--------------------------------------------------------------------------
-    # Private Methods for Heuristic (Fallback) Parsing
-    #--------------------------------------------------------------------------
-
-    def _get_heading_level_from_body(self, paragraph) -> Optional[int]:
-        """
-        Heuristically determines heading level with a word count constraint to
-        avoid misclassifying long paragraphs as headings.
-        """
-        text = paragraph.text.strip()
+                entry = TOCEntry(
+                    level=level,
+                    title=text,
+                    para_index=i,
+                    source_method="document_body"
+                )
+                toc_entries.append(entry)
+                last_entry = entry
+            else:
+                if last_entry:
+                    current_content.append(text)
         
+        if last_entry and current_content:
+            last_entry.content = '\n'.join(current_content).strip()
+            last_entry.has_content = bool(last_entry.content)
+        
+        self._add_table_content_to_entries(toc_entries)
+        
+        return toc_entries
 
-        if len(text.split()) > 25:
-            return None
-
-        style_name = paragraph.style.name.lower() if paragraph.style else ""
-        if 'heading' in style_name:
+    def _is_heading(self, para) -> Tuple[bool, int]:
+        """Determine if a paragraph is a heading using reliable methods."""
+        text = para.text.strip()
+        
+        # Method 1: Check Word heading styles
+        if para.style and para.style.name:
+            style_name = para.style.name.lower()
+            if 'heading' in style_name:
+                level_match = re.search(r'heading\s*(\d+)', style_name)
+                return (True, int(level_match.group(1))) if level_match else (True, 1)
+            if 'title' in style_name:
+                return True, 1
+            if 'subtitle' in style_name:
+                return True, 2
+        
+        # Method 2: Check paragraph properties (outline level)
+        try:
+            if para._element.pPr and para._element.pPr.outlineLvl:
+                return True, para._element.pPr.outlineLvl.val + 1
+        except:
+            pass
+        
+        # Method 3: Simple heuristics
+        if 0 < len(text) <= 150 and len(text.split()) <= 20:
+            is_all_bold = para.runs and all(run.bold for run in para.runs if run.text.strip())
+            is_larger_font = False
             try:
-                level_str = style_name.split()[-1]
-                if level_str.isdigit():
-                    return int(level_str)
-            except (ValueError, IndexError):
+                if para.runs and para.runs[0].font.size:
+                    is_larger_font = para.runs[0].font.size.pt > 12
+            except:
                 pass
-        
-        match = re.match(r'^(\d+(\.\d+)*)\s', text)
-        if match:
-            return match.group(1).count('.') + 1
-        
-        if re.match(r'^Appendix\s[\w\d]+', text, re.IGNORECASE):
-            return 1
-
-        if any(run.font.bold for run in paragraph.runs):
-            return 1
-        
-        return None
-
-    def _extract_sections_to_flat_list_from_body(self) -> List[Dict]:
-        """Creates a flat list of all sections based on heuristic heading detection."""
-        flat_list: List[Dict] = []
-        current_content: List[str] = []
-        current_heading: Optional[Dict] = None
-        
-        for para in self.doc.paragraphs:
-            level = self._get_heading_level_from_body(para)
-            para_text = para.text.strip()
             
-            if level is not None and para_text:
-                if current_heading:
-                    current_heading['content'] = self._clean_content("\n".join(current_content))
-                    flat_list.append(current_heading)
-                
-                # **ENHANCEMENT**: Use the centralized title cleaning function.
-                cleaned_title = self._get_clean_title(para_text)
-                current_heading = {"topic": cleaned_title, "level": level}
-                current_content = [para_text]
-            elif para_text and current_heading:
-                current_content.append(para_text)
-        
-        if current_heading:
-            current_heading['content'] = self._clean_content("\n".join(current_content))
-            flat_list.append(current_heading)
+            is_heading_pattern = any([
+                text.startswith('Chapter '),
+                text.startswith('Section '),
+                text.startswith('Part '),
+                text.startswith('Article '),
+                text.startswith('Appendix '),
+                text.isupper() and len(text.split()) <= 10
+            ])
             
-        return flat_list
+            heading_keywords = ['introduction', 'background', 'purpose', 'scope', 'objective',
+                               'overview', 'summary', 'conclusion', 'references', 'appendix',
+                               'definitions', 'glossary', 'requirements', 'methodology']
+            has_heading_keyword = any(keyword in text.lower() for keyword in heading_keywords)
+            
+            if is_heading_pattern:
+                return True, 1
+            if (is_all_bold or is_larger_font) and (text.istitle() or text.isupper()):
+                return True, 2
+            if has_heading_keyword and (is_all_bold or is_larger_font or text.istitle()):
+                return True, 2
+        
+        return False, 0
 
-    def _build_nested_content_tree(self, flat_list: List[Dict]) -> List[Dict]:
-        """Constructs a nested hierarchy from a flat list of sections and their levels."""
-        if not flat_list:
+    def _map_content_to_toc_entries(self, toc_entries: List[TOCEntry]):
+        """Maps content to TOC entries using a robust two-pass approach."""
+        if not toc_entries:
+            return
+        
+        all_paras = self.doc.paragraphs
+        
+        # Find the paragraph index for each TOC entry title
+        for entry in toc_entries:
+            found_index = -1
+            
+            # Pass 1: Look for a perfect match (text match + heading style)
+            for i, para in enumerate(all_paras):
+                if self._text_matches_title(para.text.strip(), entry.title):
+                    is_heading, _ = self._is_heading(para)
+                    if is_heading:
+                        found_index = i
+                        break
+            
+            # Pass 2: If no perfect match, find the first text-only match
+            if found_index == -1:
+                for i, para in enumerate(all_paras):
+                    if self._text_matches_title(para.text.strip(), entry.title):
+                        found_index = i
+                        break
+            
+            entry.para_index = found_index if found_index != -1 else None
+        
+        # Filter and sort entries that were successfully located
+        located_entries = sorted([e for e in toc_entries if e.para_index is not None], 
+                                key=lambda x: x.para_index)
+        
+        # Assign content between one heading and the next
+        for i, entry in enumerate(located_entries):
+            start_index = entry.para_index + 1
+            end_index = len(all_paras)
+            
+            if i + 1 < len(located_entries):
+                end_index = located_entries[i+1].para_index
+            
+            content_paras = all_paras[start_index:end_index]
+            content = '\n'.join([p.text.strip() for p in content_paras if p.text.strip()])
+            
+            entry.content = content.strip()
+            if entry.content:
+                entry.has_content = True
+
+    def _text_matches_title(self, text: str, title: str) -> bool:
+        """Check if document text matches a TOC title."""
+        text_normalized = ' '.join(re.sub(r'[^\w\s]', '', text).lower().split())
+        title_normalized = ' '.join(re.sub(r'[^\w\s]', '', title).lower().split())
+        
+        if not text_normalized or not title_normalized:
+            return False
+        
+        return title_normalized in text_normalized or text_normalized in title_normalized
+
+    def _add_table_content_to_entries(self, toc_entries: List[TOCEntry]):
+        """Add table content to the appropriate TOC entries."""
+        tables_text = []
+        for table in self.doc.tables:
+            table_content = self._extract_table_text(table)
+            if table_content:
+                tables_text.append(f"\n[Table Content]\n{table_content}\n")
+        
+        if toc_entries and tables_text:
+            toc_entries[-1].content += '\n'.join(tables_text)
+
+    def _extract_table_text(self, table: Table) -> str:
+        """Extract text from a table."""
+        rows = []
+        for row in table.rows:
+            row_text = " | ".join(cell.text.strip() for cell in row.cells)
+            if row_text.strip():
+                rows.append(row_text)
+        return "\n".join(rows)
+
+    def _build_hierarchy(self, flat_toc: List[TOCEntry]) -> List[TOCEntry]:
+        """Build hierarchical structure from flat list."""
+        if not flat_toc:
             return []
-            
-        root_nodes: List[Dict] = []
-        parent_stack: List[Dict] = []
         
-        for section in flat_list:
-            level = section['level']
-            new_node = {
-                "topic": section['topic'], 
-                "content": section['content'], 
+        root_entries, stack = [], []
+        for entry in flat_toc:
+            while stack and stack[-1].level >= entry.level:
+                stack.pop()
+            if stack:
+                stack[-1].children.append(entry)
+            else:
+                root_entries.append(entry)
+            stack.append(entry)
+        return root_entries
+
+    def _prune_empty_topics(self, toc_entries: List[TOCEntry]) -> List[TOCEntry]:
+        """
+        Removes topics that have less than 30 words and no children.
+        Topics with less than 30 words but with children are kept.
+        """
+        pruned_list = []
+        for entry in toc_entries:
+            # First, recursively prune the children
+            if entry.children:
+                entry.children = self._prune_empty_topics(entry.children)
+            
+            # Check removal criteria
+            word_count = len(entry.content.split())
+            has_no_children = not entry.children
+
+            # Remove if: less than 5 words AND no children
+            if word_count < 5 and has_no_children:
+                logger.info(f"Pruning empty topic: '{entry.title[:100]}' ({word_count} words)")
+                continue
+            
+            pruned_list.append(entry)
+        
+        return pruned_list
+
+    def _create_topic_documents(self, hierarchical_toc: List[TOCEntry]) -> List[Dict[str, Any]]:
+        """
+        Convert hierarchical TOC to flat list of topic documents for indexing.
+        Each main topic becomes one document with its subtopics embedded.
+        No embeddings needed - retrieval is by ID only.
+        """
+        topic_documents = []
+        
+        for entry in hierarchical_toc:
+            # Create topic document
+            topic_doc = {
+                "id": str(uuid.uuid4()),
+                "topic": entry.title,
+                "topic_content": entry.content,
                 "subtopics": []
             }
             
-            while parent_stack and parent_stack[-1]['level'] >= level:
-                parent_stack.pop()
+            # Add subtopics (children) with their own IDs
+            if entry.children:
+                for child in entry.children:
+                    subtopic_data = {
+                        "id": str(uuid.uuid4()),  # Generate UUID for each subtopic
+                        "name": child.title,
+                        "content": child.content
+                    }
+                    topic_doc["subtopics"].append(subtopic_data)
+                    
+                    # If subtopic has its own children, add them as nested content
+                    if child.children:
+                        nested_content = self._get_nested_content(child.children)
+                        subtopic_data["content"] = f"{child.content}\n\n{nested_content}".strip()
             
-            if not parent_stack:
-                root_nodes.append(new_node)
-            else:
-                parent_stack[-1]['node']['subtopics'].append(new_node)
-            
-            parent_stack.append({'level': level, 'node': new_node})
-            
-        return root_nodes
-
-    #--------------------------------------------------------------------------
-    # Utility and Helper Methods
-    #--------------------------------------------------------------------------
-    
-    @staticmethod
-    def _get_clean_title(text: str) -> str:
-        """
-        Cleans a title string and shortens it if it's excessively long
-        by splitting on common separators.
-        """
-        title = re.sub(r'\t+', ' ', text).strip()
-        title = re.sub(r'[\s.]+$', '', title).strip()
+            topic_documents.append(topic_doc)
         
-        # Shorten titles that look like sentences.
-        if len(title.split()) > 15:
-            separators = [' - ', ' – ', ': ']
-            for sep in separators:
-                if sep in title:
-                    return title.split(sep, 1)[0].strip()
-        return title
+        return topic_documents
 
+    def _get_nested_content(self, children: List[TOCEntry]) -> str:
+        """Recursively get content from nested children."""
+        content_parts = []
+        for child in children:
+            if child.content:
+                content_parts.append(f"{child.title}:\n{child.content}")
+            if child.children:
+                nested = self._get_nested_content(child.children)
+                if nested:
+                    content_parts.append(nested)
+        return "\n\n".join(content_parts)
 
-    @staticmethod
-    def _titles_match(para_text: str, topic_title: str) -> bool:
-        """
-        A more robust function to check if a paragraph's text matches a TOC title.
-        It normalizes both strings by converting to lowercase, stripping leading numbers
-        and punctuation, and removing extra whitespace. This allows for flexible matching.
-        """
-        # Normalize the text from the paragraph in the document's body
-        # This strips leading list markers like "1.", "1.1.", "A.", etc.
-        norm_para = re.sub(r'^[\w\d.\s]+\s', '', para_text, count=1).lower().strip()
-        
-        # Normalize the title from the Table of Contents
-        norm_topic = re.sub(r'^[\w\d.\s]+\s', '', topic_title, count=1).lower().strip()
-
-        # Sometimes the body heading is just the raw title without numbering
-        raw_para_norm = para_text.lower().strip()
-
-        # A match occurs if the normalized titles are the same,
-        # or if the raw paragraph text matches the normalized TOC title.
-        return norm_para == norm_topic or raw_para_norm == norm_topic
-
-    @staticmethod
-    def _flatten_nodes(nodes: List[Dict]) -> List[Dict]:
-        """Recursively flattens a tree of nodes into a list."""
-        flat_list: List[Dict] = []
-        for node in nodes:
-            flat_list.append(node)
-            if node.get("subtopics"):
-                flat_list.extend(DocumentProcessor._flatten_nodes(node["subtopics"]))
-        return flat_list
-
-    @staticmethod
-    def _clean_content(text: str) -> str:
-        """Cleans final extracted text by removing artifacts and extra whitespace."""
-        if not text:
-            return ""
-        cleaned_text = text.replace('\u2026', '').replace('\t', ' ')
-        cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
-        lines = [line.strip() for line in cleaned_text.split('\n')]
-        return "\n".join(filter(None, lines))
-
-    def _create_toc_from_content_tree(self, content_tree: List[Dict]) -> List[Dict]:
-        """Recursively generates a clean TOC structure (without content)."""
-        toc_tree = []
-        for node in content_tree:
-            toc_node = {
-                "topic": node["topic"],
-                "page_number": node.get("page_number"),
-                "subtopics": self._create_toc_from_content_tree(node.get("subtopics", []))
+    def _create_simple_toc(self, hierarchical_toc: List[TOCEntry]) -> List[Dict]:
+        """Create a simple TOC structure for UI display."""
+        toc = []
+        for entry in hierarchical_toc:
+            toc_item = {
+                "topic": entry.title,
+                "subtopics": []
             }
-            toc_tree.append(toc_node)
-        return toc_tree
+            
+            if entry.children:
+                for child in entry.children:
+                    toc_item["subtopics"].append({
+                        "topic": child.title,
+                        "subtopics": self._create_simple_toc(child.children) if child.children else []
+                    })
+            
+            toc.append(toc_item)
+        
+        return toc
+
+    def _get_full_text(self) -> str:
+        """Get the full document text."""
+        paragraphs = [para.text.strip() for para in self.doc.paragraphs if para.text.strip()]
+        return '\n'.join(paragraphs)

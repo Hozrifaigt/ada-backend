@@ -31,7 +31,7 @@ services:
       - "8080:8000"
     volumes:
       - ./app:/code/app
-      - ./data/client_data:/code/data/client_data
+      - ../ADA_DATA/client_data:/code/data/client_data
     # depends_on:
     #   - qdrant
     #   - ollama

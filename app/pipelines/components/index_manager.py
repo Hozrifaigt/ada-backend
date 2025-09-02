@@ -24,7 +24,7 @@ from azure.search.documents.indexes.models import (
 logger = logging.getLogger(__name__)
 
 class AzureSearchIndexManager:
-    """Manages Azure Search index creation and schema for RAG system."""
+    """Manages Azure Search index - simplified with vectors only for policy descriptions."""
 
     def __init__(self, index_name: Optional[str] = None):        
         self.index_name = index_name or settings.AZURE_SEARCH_INDEX_NAME
@@ -49,28 +49,20 @@ class AzureSearchIndexManager:
             return False
     
     def create_rag_index(self, index_name: Optional[str] = None) -> bool:
-        """Create production-ready RAG index with proper schema."""
+        """Create simplified RAG index - vectors only for policy descriptions."""
         target_index = index_name or self.index_name
         try:
-            logger.info(f"Creating index: {target_index}")
+            logger.info(f"Creating simplified index: {target_index}")
             
             fields = [
                 # Common fields
                 SimpleField(name="id", type=SearchFieldDataType.String, key=True),
                 SimpleField(name="record_type", type=SearchFieldDataType.String, filterable=True, facetable=True),
                 
-                # Policy-specific fields
-                SearchableField(name="description", type=SearchFieldDataType.String, searchable=True, analyzer_name="en.microsoft"),
+                # Policy-specific fields (WITH vector for similarity search)
+                SimpleField(name="filename", type=SearchFieldDataType.String, filterable=True, facetable=True),
                 SimpleField(name="source", type=SearchFieldDataType.String, filterable=True),
-                
-                # Chunk-specific fields  
-                SearchableField(name="content", type=SearchFieldDataType.String, searchable=True, analyzer_name="en.microsoft"),
-                SearchableField(name="topic", type=SearchFieldDataType.String, searchable=True, filterable=True, sortable=True),
-                SimpleField(name="level", type=SearchFieldDataType.Int32, filterable=True, sortable=True, facetable=True),
-                SearchableField(name="parent_topic", type=SearchFieldDataType.String, searchable=True, filterable=True),
-                SimpleField(name="is_subtopic", type=SearchFieldDataType.Boolean, filterable=True, facetable=True),
-                
-                # Vector fields for semantic search
+                SearchableField(name="description", type=SearchFieldDataType.String, searchable=True, analyzer_name="en.microsoft"),
                 SearchField(
                     name="description_vector",
                     type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -78,21 +70,28 @@ class AzureSearchIndexManager:
                     vector_search_dimensions=settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS,
                     vector_search_profile_name="default-vector-profile"
                 ),
-                SearchField(
-                    name="content_vector", 
-                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-                    searchable=True,
-                    vector_search_dimensions=settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS,
-                    vector_search_profile_name="default-vector-profile"
-                ),
+                SimpleField(name="toc", type=SearchFieldDataType.String, searchable=False),
+                SimpleField(name="topic_ids", type=SearchFieldDataType.Collection(SearchFieldDataType.String), filterable=False),
                 
-                SimpleField(name="toc", type=SearchFieldDataType.String, searchable=False, filterable=False)
+                # Topic-specific fields (NO vectors - retrieval by ID only)
+                SimpleField(name="policy_id", type=SearchFieldDataType.String, filterable=True),
+                SearchableField(name="topic", type=SearchFieldDataType.String, searchable=True, filterable=True, sortable=True),
+                SimpleField(name="topic_content", type=SearchFieldDataType.String, searchable=False),  # Not searchable, just storage
+                SimpleField(name="subtopics", type=SearchFieldDataType.String, searchable=False)  # JSON string, no vectors
             ]
             
-            # Indexing Method
+            # Vector search configuration (only for policy descriptions)
             vector_search = VectorSearch(
                 algorithms=[
-                    HnswAlgorithmConfiguration(name="default-hnsw-algorithm")
+                    HnswAlgorithmConfiguration(
+                        name="default-hnsw-algorithm",
+                        parameters={
+                            "m": 4,
+                            "efConstruction": 400,
+                            "efSearch": 500,
+                            "metric": "cosine"
+                        }
+                    )
                 ],
                 profiles=[
                     VectorSearchProfile(
@@ -102,18 +101,16 @@ class AzureSearchIndexManager:
                 ]
             )
             
-            # Configure semantic search for better hybrid search
+            # Semantic search configuration (simplified - only for policy search)
             semantic_config = SemanticConfiguration(
-                name="rag-semantic-config",
+                name="policy-semantic-config",
                 prioritized_fields=SemanticPrioritizedFields(
-                    title_field=SemanticField(field_name="topic"),
+                    title_field=SemanticField(field_name="filename"),
                     content_fields=[
-                        SemanticField(field_name="description"),
-                        SemanticField(field_name="content"),
+                        SemanticField(field_name="description")
                     ],
                     keywords_fields=[
-                        SemanticField(field_name="source"),
-                        SemanticField(field_name="parent_topic")
+                        SemanticField(field_name="source")
                     ]
                 )
             )
@@ -128,9 +125,9 @@ class AzureSearchIndexManager:
                 semantic_search=semantic_search
             )
             
-            # Create the index
             result = self.index_client.create_index(index)
-            logger.info(f"Successfully created RAG index: {result.name}")
+            logger.info(f"Successfully created simplified RAG index: {result.name}")
+            logger.info("Note: Vector search enabled only for policy descriptions")
                        
             return True
             
@@ -162,15 +159,32 @@ class AzureSearchIndexManager:
             
             index = self.index_client.get_index(target_index)
             
+            # Count vector fields
+            vector_fields = [f for f in index.fields 
+                           if hasattr(f, 'vector_search_dimensions') 
+                           and f.vector_search_dimensions is not None]
+            
             stats = {
                 "name": index.name,
                 "field_count": len(index.fields),
+                "vector_field_count": len(vector_fields),
                 "vector_search_enabled": index.vector_search is not None,
                 "semantic_search_enabled": index.semantic_search is not None,
-                "fields": [{"name": f.name, "type": str(f.type), "searchable": getattr(f, 'searchable', False)} for f in index.fields]
+                "fields": [
+                    {
+                        "name": f.name, 
+                        "type": str(f.type), 
+                        "searchable": getattr(f, 'searchable', False),
+                        "filterable": getattr(f, 'filterable', False),
+                        "has_vector": hasattr(f, 'vector_search_dimensions') and f.vector_search_dimensions is not None
+                    } 
+                    for f in index.fields
+                ]
             }
             
-            logger.info(f"Index stats for '{target_index}': {stats}")
+            logger.info(f"Index stats for '{target_index}': {stats['field_count']} fields, "
+                       f"{stats['vector_field_count']} vector fields, "
+                       f"semantic search: {stats['semantic_search_enabled']}")
             return stats
             
         except Exception as e:
@@ -193,24 +207,8 @@ class AzureSearchIndexManager:
         logger.warning(f"Recreating index '{target_index}' - ALL DATA WILL BE LOST")
         
         if self.delete_index(target_index):
-            logger.info("Index deleted, creating new one...")
+            logger.info("Index deleted, creating new simplified index...")
             return self.create_rag_index(target_index)
         else:
             logger.error("Failed to delete index, cannot recreate")
             return False
-
-def main():
-    
-    manager = AzureSearchIndexManager()
-    
-    if manager.ensure_index_exists():
-        stats = manager.get_index_stats()
-        if stats:
-            logger.info(f"Index '{stats['name']}' statistics:")
-            logger.info(f"Vector search:  {stats.get('vector_search_enabled', 'None')} ")
-            logger.info(f"Semantic search:  {stats.get('semantic_search_enabled', 'None')} ")
-    else:
-        logger.error("Failed to create RAG index")
-
-if __name__ == "__main__":
-    main()
