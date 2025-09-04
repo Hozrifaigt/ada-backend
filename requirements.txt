@@ -17,3 +17,8 @@ PyYAML==6.0.2
 tqdm==4.67.1
 unstructured[docx]==0.18.3
 python-docx==1.2.0
+
+msal==1.33.0
+PyJWT==2.10.1
+cryptography==45.0.7
+httpx==0.28.1

@@ -1,7 +1,5 @@
-from enum import Enum
-from typing import Literal
+from typing import List
 from pydantic_settings import BaseSettings
-
 
 class Settings(BaseSettings):
 
@@ -11,11 +9,22 @@ class Settings(BaseSettings):
     AZURE_OPENAI_CHAT_DEPLOYMENT: str
     AZURE_OPENAI_API_VERSION: str = "2025-01-01-preview"
     AZURE_OPENAI_EMBEDDING_DIMENSIONS: int = 1536
+
     AZURE_SEARCH_ENDPOINT: str
     AZURE_SEARCH_KEY: str
     AZURE_SEARCH_INDEX_NAME: str
+
     AZURE_STORAGE_CONNECTION_STRING: str
     AZURE_STORAGE_CONTAINER_NAME: str
+
+    AZURE_TENANT_ID: str  
+    AZURE_CLIENT_ID: str
+    AZURE_CLIENT_SECRET: str
+
+    JWT_ALGORITHM: str = "RS256"
+    TOKEN_CACHE_TTL_HOURS: int = 1
+
+    ALLOWED_EMAIL_DOMAINS: List[str] = ["grantthornton.ae", "gt.com"]  
 
     ADMIN_API_KEY: str 
     PROMPT_MANAGER_PATH: str

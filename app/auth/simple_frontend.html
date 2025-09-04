@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Azure Token Generator</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 700px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #0078d4;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 0;
+        }
+        button:hover { background: #106ebe; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .success { background: #d4edda; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; border: 1px solid #f5c6cb; }
+        textarea {
+            width: 100%;
+            height: 100px;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Azure AD Token Generator</h1>
+        <p>Generate access tokens for testing your AI Policy API</p>
+        
+        <div id="loadingStatus" class="loading">Loading MSAL library...</div>
+        
+        <div id="form" style="display: none;">
+            <label>Azure Tenant ID:</label>
+            <input type="text" id="tenantId" placeholder="12345678-1234-1234-1234-123456789012">
+            
+            <label>Application (Client) ID:</label>
+            <input type="text" id="clientId" placeholder="87654321-4321-4321-4321-210987654321">
+            
+            <button id="getTokenBtn" onclick="getToken()">🚀 Generate Token</button>
+        </div>
+        
+        <div id="result"></div>
+    </div>
+
+    <!-- Load MSAL with proper error handling -->
+    <script>
+        let msalLoaded = false;
+        let msalInstance = null;
+
+        // Function to check if MSAL is loaded
+        function checkMSALLoaded() {
+            if (typeof msal !== 'undefined') {
+                msalLoaded = true;
+                document.getElementById('loadingStatus').innerHTML = '✅ MSAL library loaded successfully';
+                document.getElementById('form').style.display = 'block';
+                console.log('MSAL library loaded successfully');
+            } else {
+                console.error('MSAL library failed to load');
+                document.getElementById('loadingStatus').innerHTML = `
+                    ❌ Failed to load MSAL library. 
+                    <br><br>
+                    <strong>Troubleshooting:</strong>
+                    <ul>
+                        <li>Check your internet connection</li>
+                        <li>Try refreshing the page</li>
+                        <li>Check if your firewall/antivirus is blocking the CDN</li>
+                    </ul>
+                    <button onclick="location.reload()">Reload Page</button>
+                `;
+            }
+        }
+
+        // Load MSAL library with fallback
+        function loadMSAL() {
+            const script = document.createElement('script');
+            script.src = 'https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js';
+            script.onload = function() {
+                console.log('MSAL script loaded');
+                // Give it a moment to initialize
+                setTimeout(checkMSALLoaded, 100);
+            };
+            script.onerror = function() {
+                console.error('Failed to load MSAL from CDN, trying fallback...');
+                // Try alternative CDN
+                const fallbackScript = document.createElement('script');
+                fallbackScript.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';
+                fallbackScript.onload = function() {
+                    setTimeout(checkMSALLoaded, 100);
+                };
+                fallbackScript.onerror = function() {
+                    document.getElementById('loadingStatus').innerHTML = `
+                        ❌ Could not load MSAL library from any CDN.
+                        <br><br>Please check your internet connection and try again.
+                        <br><button onclick="location.reload()">Retry</button>
+                    `;
+                };
+                document.head.appendChild(fallbackScript);
+            };
+            document.head.appendChild(script);
+        }
+
+        async function getToken() {
+
+            if (!msalLoaded) {
+                showError('MSAL library is not loaded yet. Please wait or refresh the page.');
+                return;
+            }
+
+            const tenantId = document.getElementById('tenantId').value.trim();
+            const clientId = document.getElementById('clientId').value.trim();
+
+            
+            if (!tenantId || !clientId) {
+                showError('Please enter both Tenant ID and Client ID');
+                return;
+            }
+
+            // Validate GUID format
+            const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!guidRegex.test(tenantId)) {
+                showError('Tenant ID must be a valid GUID format');
+                return;
+            }
+            if (!guidRegex.test(clientId)) {
+                showError('Client ID must be a valid GUID format');
+                return;
+            }
+            
+            const button = document.getElementById('getTokenBtn');
+            button.disabled = true;
+            button.textContent = '🔄 Authenticating...';
+            
+            try {
+                const msalConfig = {
+                    auth: {
+                        clientId: clientId,
+                        authority: `https://login.microsoftonline.com/${tenantId}`,
+                        redirectUri: window.location.origin
+                    },
+                    cache: {
+                        cacheLocation: "localStorage",
+                        storeAuthStateInCookie: false
+                    }
+                };
+                
+                msalInstance = new msal.PublicClientApplication(msalConfig);
+                
+                // --- FINAL CORRECTION ---
+                const loginRequest = {
+                    scopes: [
+                        // Remove 'api://' when client and resource are the same application.
+                        `${clientId}/.default`
+                    ]
+                };
+
+                console.log('Starting authentication with GUID-based scope:', loginRequest.scopes);
+                const response = await msalInstance.loginPopup(loginRequest);
+                console.log('Authentication successful:', response);
+                
+                showSuccess(response);
+                
+            } catch (error) {
+                console.error('Authentication failed:', error);
+                showError(`Authentication failed: ${error.message}`);
+            } finally {
+                button.disabled = false;
+                button.textContent = '🚀 Generate Token';
+            }
+
+        }
+
+        function showSuccess(response) {
+            const token = response.accessToken;
+            const account = response.account;
+            
+            document.getElementById('result').innerHTML = `
+                <div class="result success">
+                    <h3>✅ Token Generated Successfully!</h3>
+                    <p><strong>User:</strong> ${account.username}</p>
+                    <p><strong>Name:</strong> ${account.name || 'N/A'}</p>
+                    <p><strong>Tenant:</strong> ${account.tenantId}</p>
+                    
+                    <h4>Your Access Token:</h4>
+                    <textarea id="tokenArea" readonly>${token}</textarea>
+                    <br>
+                    <button onclick="copyToken()">📋 Copy Token</button>
+                    <button onclick="testAPI()">🧪 Test API</button>
+                    
+                    <h4>Quick Test Command:</h4>
+                    <code style="background: #f0f0f0; padding: 10px; display: block; margin: 10px 0; border-radius: 5px;">
+curl -X GET "http://localhost:8080/api/v1/auth/me" -H "Authorization: Bearer ${token.substring(0, 30)}..."
+                    </code>
+                </div>
+            `;
+        }
+
+        function showError(message) {
+            document.getElementById('result').innerHTML = `
+                <div class="result error">
+                    <h3>❌ Error</h3>
+                    <p>${message}</p>
+                </div>
+            `;
+        }
+
+        function copyToken() {
+            const tokenArea = document.getElementById('tokenArea');
+            tokenArea.select();
+            document.execCommand('copy');
+            alert('✅ Token copied to clipboard!');
+        }
+
+        async function testAPI() {
+            const token = document.getElementById('tokenArea').value;
+            
+            try {
+                const response = await fetch('http://localhost:8080/api/v1/auth/me', {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    alert(`✅ API Test Successful!\n\nResponse:\n${JSON.stringify(data, null, 2)}`);
+                } else {
+                    const errorText = await response.text();
+                    alert(`❌ API Test Failed (${response.status})\n\n${errorText}`);
+                }
+            } catch (error) {
+                alert(`❌ API Test Failed\n\nError: ${error.message}\n\nMake sure your FastAPI server is running on http://localhost:8080`);
+            }
+        }
+
+        // Start loading MSAL when page loads
+        window.addEventListener('load', function() {
+            console.log('Page loaded, starting MSAL load...');
+            loadMSAL();
+        });
+    </script>
+</body>
+</html>
