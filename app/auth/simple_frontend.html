@@ -139,6 +139,9 @@
 
         async function getToken() {
 
+            const redirectUri = "http://localhost:5500";
+            console.log("Using Redirect URI:", redirectUri); // <-- Add this line
+
             if (!msalLoaded) {
                 showError('MSAL library is not loaded yet. Please wait or refresh the page.');
                 return;
@@ -146,7 +149,6 @@
 
             const tenantId = document.getElementById('tenantId').value.trim();
             const clientId = document.getElementById('clientId').value.trim();
-
             
             if (!tenantId || !clientId) {
                 showError('Please enter both Tenant ID and Client ID');
@@ -183,15 +185,16 @@
                 
                 msalInstance = new msal.PublicClientApplication(msalConfig);
                 
-                // --- FINAL CORRECTION ---
                 const loginRequest = {
                     scopes: [
-                        // Remove 'api://' when client and resource are the same application.
-                        `${clientId}/.default`
+                        "openid", 
+                        "profile", 
+                        "User.Read"
                     ]
                 };
 
-                console.log('Starting authentication with GUID-based scope:', loginRequest.scopes);
+
+                console.log('Starting authentication...');
                 const response = await msalInstance.loginPopup(loginRequest);
                 console.log('Authentication successful:', response);
                 
@@ -204,7 +207,6 @@
                 button.disabled = false;
                 button.textContent = '🚀 Generate Token';
             }
-
         }
 
         function showSuccess(response) {
