@@ -3,12 +3,10 @@ import msal
 import httpx
 import logging
 
-
 from typing import Dict, Any
 from datetime import datetime, timedelta
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from functools import lru_cache
 
 from app.config.settings import settings
 
@@ -38,7 +36,6 @@ class EntraIDService:
         
         logger.info("EntraIDService initialized successfully")
     
-    @lru_cache(maxsize=1)
     async def get_jwks_keys(self) -> Dict[str, Any]:
         """
         Fetch and cache Azure AD's JSON Web Key Set (JWKS) for token verification.
@@ -97,13 +94,9 @@ class EntraIDService:
         Validate an Azure AD access token and return the decoded claims.
         """
         try:
-            # Decode token header to get the key ID
             token_header = jwt.get_unverified_header(token)
-            
-            # Get JWKS keys from Azure AD
             jwks = await self.get_jwks_keys()
             
-            # Get the public key for this token
             public_key = self.get_public_key_from_jwks(token_header, jwks)
             
             # Verify and decode the token
@@ -143,6 +136,9 @@ class EntraIDService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication token"
             )
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            raise
         except Exception as e:
             logger.error(f"Token validation error: {e}")
             raise HTTPException(
@@ -155,14 +151,10 @@ class EntraIDService:
         Extract user information from validated token claims.
         """
         return {
-            "user_id": token_claims.get("oid"),  # Object ID (unique user identifier)
-            "email": token_claims.get("preferred_username") or token_claims.get("email"),
+            "user_id": token_claims.get("oid"),
+            "email": token_claims.get("preferred_username"),
             "name": token_claims.get("name"),
-            "given_name": token_claims.get("given_name"),
-            "family_name": token_claims.get("family_name"),
-            "tenant_id": token_claims.get("tid"),
-            "app_roles": token_claims.get("roles", []),
-            "groups": token_claims.get("groups", [])
+            "tenant_id": token_claims.get("tid")
         }
     
     async def validate_user_permissions(self, user_info: Dict[str, Any]) -> bool:
@@ -171,18 +163,21 @@ class EntraIDService:
         Customize this method based on your requirements.
         """
         # Check if user belongs to Grant Thornton tenant
+
+        logger.info(f"Validating permissions for user: {user_info}")
+
         if user_info.get("tenant_id") != settings.AZURE_TENANT_ID:
             logger.warning(f"User from wrong tenant: {user_info.get('tenant_id')}")
             return False
         
         # Check if user email domain is allowed
         email = user_info.get("email", "")
-        allowed_domains = getattr(settings, 'ALLOWED_EMAIL_DOMAINS', ["grantthornton.ae"])
-        
+
+        allowed_domains = [domain.strip() for domain in settings.ALLOWED_EMAIL_DOMAINS.split(',')]        
         if not any(email.lower().endswith(f"@{domain}") for domain in allowed_domains):
             logger.warning(f"User email not from allowed domain: {email}")
             return False
-        
+
         return True
 
 
@@ -207,13 +202,9 @@ async def get_current_user(
             detail="Missing authentication token"
         )
     
-    # Validate the access token
-    token_claims = await entra_service.validate_access_token(credentials.credentials)
-    
-    # Get user information
+    token_claims = await entra_service.validate_access_token(credentials.credentials)    
     user_info = await entra_service.get_user_info(token_claims)
     
-    # Validate user permissions
     if not await entra_service.validate_user_permissions(user_info):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -222,31 +213,3 @@ async def get_current_user(
     
     logger.info(f"Authenticated user: {user_info.get('email')} ({user_info.get('user_id')})")
     return user_info
-
-
-# Will see if we are going to utilize for some endpoints later on.
-async def get_admin_user(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    """
-    FastAPI dependency for endpoints that require admin privileges.
-    """
-    # Check if user has admin role/group
-    user_roles = current_user.get("app_roles", [])
-    user_groups = current_user.get("groups", [])
-    
-    # Define admin criteria (customize as needed)
-    admin_roles = getattr(settings, 'ADMIN_ROLES', ["Admin", "PolicyAdmin"])
-    admin_groups = getattr(settings, 'ADMIN_GROUPS', [])
-    
-    is_admin = (
-        any(role in admin_roles for role in user_roles) or
-        any(group in admin_groups for group in user_groups)
-    )
-    
-    if not is_admin:
-        logger.warning(f"Non-admin user attempted admin access: {current_user.get('email')}")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Administrator privileges required"
-        )
-    
-    return current_user

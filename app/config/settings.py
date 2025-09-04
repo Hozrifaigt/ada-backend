@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "RS256"
     TOKEN_CACHE_TTL_HOURS: int = 1
 
-    ALLOWED_EMAIL_DOMAINS: List[str] = ["grantthornton.ae", "gt.com"]  
+    ALLOWED_EMAIL_DOMAINS: str = "ae.gt.com"
 
     ADMIN_API_KEY: str 
     PROMPT_MANAGER_PATH: str

@@ -2,10 +2,10 @@ import logging
 
 
 from typing import Dict, Any
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.auth.entra_service import get_current_user, get_admin_user
+from app.auth.entra_service import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +14,7 @@ class UserInfoResponse(BaseModel):
     user_id: str
     email: str
     name: str
-    given_name: str = None
-    family_name: str = None
     tenant_id: str
-    app_roles: list = []
-    groups: list = []
-    is_admin: bool = False
 
 class AuthStatusResponse(BaseModel):
     """Response model for authentication status."""
@@ -38,24 +33,11 @@ async def get_current_user_info(
     This endpoint requires a valid Bearer token in the Authorization header.
     """
     logger.info(f"User info requested for: {current_user.get('email')}")
-    
-    # Check if user has admin privileges (without enforcing it)
-    try:
-        await get_admin_user(current_user)
-        is_admin = True
-    except HTTPException:
-        is_admin = False
-    
     return UserInfoResponse(
         user_id=current_user.get("user_id", ""),
         email=current_user.get("email", ""),
         name=current_user.get("name", ""),
-        given_name=current_user.get("given_name"),
-        family_name=current_user.get("family_name"),
-        tenant_id=current_user.get("tenant_id", ""),
-        app_roles=current_user.get("app_roles", []),
-        groups=current_user.get("groups", []),
-        is_admin=is_admin
+        tenant_id=current_user.get("tenant_id", "")
     )
 
 @router.get("/auth/status", response_model=AuthStatusResponse)
@@ -75,11 +57,7 @@ async def check_auth_status(
             user_id=current_user.get("user_id", ""),
             email=current_user.get("email", ""),
             name=current_user.get("name", ""),
-            given_name=current_user.get("given_name"),
-            family_name=current_user.get("family_name"),
-            tenant_id=current_user.get("tenant_id", ""),
-            app_roles=current_user.get("app_roles", []),
-            groups=current_user.get("groups", [])
+            tenant_id=current_user.get("tenant_id", "")
         )
     )
 
@@ -97,19 +75,4 @@ async def validate_token(
         "valid": True,
         "user": current_user,
         "message": "Token is valid"
-    }
-
-@router.get("/auth/admin-check")
-async def admin_check(
-    admin_user: Dict[str, Any] = Depends(get_admin_user)
-) -> Dict[str, str]:
-    """
-    Endpoint that requires admin privileges.
-    Use this to test admin-only functionality.
-    """
-    logger.info(f"Admin access granted to: {admin_user.get('email')}")
-    
-    return {
-        "message": "Admin access granted",
-        "user": admin_user.get("email", "Unknown")
     }
