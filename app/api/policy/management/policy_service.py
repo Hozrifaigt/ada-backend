@@ -2,7 +2,11 @@ import os
 import json
 import logging
 
+from unstructured_client import Optional
+
 from fastapi import HTTPException, status
+from typing import Dict, Any
+
 
 from app.models.policy_models import PoliciesListResponse
 from app.pipelines.components.vector_store import AzureVectorStore
@@ -22,7 +26,7 @@ class PolicyService:
             results = store.search_client.search(
                 search_text="*",
                 filter="record_type eq 'policy'",
-                select="id,description,source,toc",
+                select="id,description,source,toc,topic_ids",
                 top=50,
             )
             
@@ -43,7 +47,8 @@ class PolicyService:
                     "source": result["source"],
                     "description": result["description"],
                     "topic_count": len(toc_structure),
-                    "toc": toc_structure
+                    "toc": toc_structure,
+                    "topics_ids": result["topic_ids"] if "topic_ids" in result else []
                 }
                 policies.append(policy_info)
             
@@ -59,3 +64,4 @@ class PolicyService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to retrieve policies: {str(e)}"
             )
+    

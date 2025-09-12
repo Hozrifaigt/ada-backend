@@ -16,11 +16,6 @@ class UserInfoResponse(BaseModel):
     name: str
     tenant_id: str
 
-class AuthStatusResponse(BaseModel):
-    """Response model for authentication status."""
-    authenticated: bool
-    message: str
-    user_info: UserInfoResponse = None
 
 router = APIRouter()
 
@@ -40,26 +35,6 @@ async def get_current_user_info(
         tenant_id=current_user.get("tenant_id", "")
     )
 
-@router.get("/auth/status", response_model=AuthStatusResponse)
-async def check_auth_status(
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> AuthStatusResponse:
-    """
-    Check if the user is properly authenticated.
-    Returns authentication status and basic user information.
-    """
-    logger.info(f"Auth status check for: {current_user.get('email')}")
-    
-    return AuthStatusResponse(
-        authenticated=True,
-        message="User is authenticated",
-        user_info=UserInfoResponse(
-            user_id=current_user.get("user_id", ""),
-            email=current_user.get("email", ""),
-            name=current_user.get("name", ""),
-            tenant_id=current_user.get("tenant_id", "")
-        )
-    )
 
 @router.post("/auth/validate-token")
 async def validate_token(

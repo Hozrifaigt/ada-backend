@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import user, processing, admin, auth
+from app.api import user, processing, admin, auth, drafts
 from app.api.policy import router as policy_router
 from app.config.logging_config import setup_logging
 
@@ -48,7 +48,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         }
     )
 
-# Generic exception handler for unexpected errors
+
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     """
@@ -68,6 +68,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 app.include_router(auth.router, prefix="/api/v1", tags=["Authentication"])
 app.include_router(policy_router, prefix="/api/v1", tags=["Policy Drafting"])
+app.include_router(drafts.router, prefix="/api/v1", tags=["Draft Management"])
 app.include_router(user.router, prefix="/api/v1", tags=["User Management"])
 app.include_router(processing.router, prefix="/api/v1", tags=["Pipeline Trigger"])
 app.include_router(admin.router, prefix="/api/v1", tags=["Administration"])

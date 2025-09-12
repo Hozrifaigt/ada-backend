@@ -15,7 +15,6 @@ from .generation import GenerationService
 from .dependencies import get_vector_store, get_llm
 from .management import PolicyService, TopicService
 
-
 logger = logging.getLogger(__name__)
 router = APIRouter()
 generation_service = GenerationService()

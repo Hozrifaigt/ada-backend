@@ -4,3 +4,10 @@
 /app/data/
 data/
 /env/*
+/knowledge_hub/*
+
+CLAUDE.md
+FEATURES_KNOWLEDGE_HUB.md
+
+app/services/generation_service.py
+app/services/word_export_service.py

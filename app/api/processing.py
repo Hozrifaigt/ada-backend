@@ -1,4 +1,6 @@
 import logging
+
+
 from starlette import status
 from starlette.responses import JSONResponse
 from fastapi import APIRouter, BackgroundTasks
@@ -6,9 +8,7 @@ from app.pipelines.pipeline_trigger import run_indexing_pipeline
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    tags=["Pipeline Trigger"],
-)
+router = APIRouter(tags=["Pipeline Trigger"])
 
 
 @router.post("/trigger-indexing", status_code=status.HTTP_202_ACCEPTED)
