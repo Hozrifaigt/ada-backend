@@ -25,8 +25,8 @@ class ContentGenerator:
         self.max_generation_time_seconds = max_generation_time_seconds
         self.max_retries = max_retries
         self.prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
-        self.generation_prompt = self.prompt_manager.get_prompt("generate_policy_content")
-        self.empty_content_prompt = self.prompt_manager.get_prompt("generate_from_empty")
+        self.generation_prompt = self.prompt_manager.get_prompt_template("generate_policy_content")
+        self.empty_content_prompt = self.prompt_manager.get_prompt_template("generate_from_empty")
     
     async def generate_policy_content(
         self,

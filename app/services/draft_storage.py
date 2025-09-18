@@ -1,14 +1,9 @@
-"""
-Draft Storage Service - Azure Table Storage implementation
-"""
-
 import json
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from azure.data.tables import TableServiceClient, TableClient
 from azure.core.exceptions import ResourceNotFoundError, AzureError
-
 from app.models.draft_models import ClientMetadata, DraftMetadata, CompleteDraft
 
 logger = logging.getLogger(__name__)
@@ -88,8 +83,22 @@ class DraftStorageService:
         try:
             # Parse the JSON draft data
             draft = json.loads(entity['draft_data'])
+
+            # Ensure TOC items have required fields (handle legacy data)
+            if 'toc' in draft:
+                for idx, topic in enumerate(draft['toc']):
+                    # Add order field if missing
+                    if 'order' not in topic:
+                        topic['order'] = idx + 1
+
+                    # Ensure subtopics have order field
+                    if 'subtopics' in topic:
+                        for sub_idx, subtopic in enumerate(topic['subtopics']):
+                            if 'order' not in subtopic:
+                                subtopic['order'] = sub_idx + 1
+
             return draft
-            
+
         except Exception as e:
             logger.error(f"Failed to deserialize draft: {e}")
             raise ValueError(f"Draft deserialization failed: {str(e)}")
@@ -116,20 +125,22 @@ class DraftStorageService:
             logger.error(f"Failed to create draft: {e}")
             return False
     
-    def get_draft(self, draft_id: str) -> Optional[Dict[str, Any]]:
+    def get_draft(self, draft_id: str) -> Optional[CompleteDraft]:
         """
         Retrieve a draft by ID.
-        Returns the draft dict or None if not found.
+        Returns the CompleteDraft model or None if not found.
         """
         try:
             entity = self.table_client.get_entity(
                 partition_key='draft',
                 row_key=draft_id
             )
-            
-            draft = self._deserialize_draft(entity)
+
+            draft_dict = self._deserialize_draft(entity)
+            # Convert dictionary to CompleteDraft model
+            draft_model = CompleteDraft(**draft_dict)
             logger.debug(f"Retrieved draft: {draft_id}")
-            return draft
+            return draft_model
             
         except ResourceNotFoundError:
             logger.warning(f"Draft not found: {draft_id}")

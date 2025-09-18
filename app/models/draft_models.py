@@ -35,15 +35,7 @@ class UpdateContentRequest(BaseModel):
     subtopic_id: Optional[str] = Field(None, description="Subtopic ID if updating subtopic")
 
 
-class RegenerateRequest(BaseModel):
-    """Request to regenerate content with new prompt."""
-    user_prompt: str = Field(..., min_length=1, max_length=5000, description="New prompt for regeneration")
-    subtopic_id: Optional[str] = Field(None, description="Subtopic ID if regenerating subtopic")
 
-
-class FinalizeTopicRequest(BaseModel):
-    """Request to finalize a topic."""
-    generate_summary: bool = Field(default=True, description="Generate AI summary if content > 150 words")
 
 
 class ExportRequest(BaseModel):
@@ -97,7 +89,9 @@ class TopicContext(BaseModel):
 class ContentGenerationResponse(BaseModel):
     """Response after content generation."""
     content: str = Field(..., description="Generated content")
-    context_used: str = Field(..., description="Preview of context used for generation")
+    sources_used: List[str] = Field(default_factory=list, description="Source IDs used for generation")
+    summary: str = Field(default="", description="Summary of generated content if > 150 words")
+    word_count: int = Field(default=0, description="Word count of generated content")
     message: str
 
 
@@ -105,19 +99,32 @@ class ContentGenerationResponse(BaseModel):
 
 class TOCTopic(BaseModel):
     """Topic in table of contents."""
-    id: str
-    title: str
+    topic_id: str
+    topic: str
     order: int
     source_topic_id: Optional[str] = None
-    subtopics: List['TOCSubtopic'] = []
+    content: str = Field(default="", description="Generated content for this topic")
+    summary: str = Field(default="", description="Summary if content > 150 words")
+    conversation_history: List['ConversationEntry'] = Field(default_factory=list, description="Conversation history for this topic")
+    subtopics: List['TOCSubtopic'] = Field(default_factory=list)
 
 
 class TOCSubtopic(BaseModel):
     """Subtopic in table of contents."""
-    id: str
-    title: str
+    subtopic_id: str
+    topic: str
     order: int
     source_subtopic_id: Optional[str] = None
+    content: str = Field(default="", description="Generated content for this subtopic")
+    summary: str = Field(default="", description="Summary if content > 150 words")
+    conversation_history: List['ConversationEntry'] = Field(default_factory=list, description="Conversation history for this subtopic")
+
+
+class ConversationEntry(BaseModel):
+    """Single conversation entry."""
+    timestamp: str
+    user_message: str
+    ai_response: str
 
 
 class Topic(BaseModel):
@@ -125,6 +132,7 @@ class Topic(BaseModel):
     id: str
     content: str = ""
     summary: str = ""
+    conversation_history: List['ConversationEntry'] = []
     subtopics: List['Subtopic'] = []
 
 
@@ -133,6 +141,7 @@ class Subtopic(BaseModel):
     id: str
     content: str = ""
     summary: str = ""
+    conversation_history: List['ConversationEntry'] = []
 
 
 class DraftMetadata(BaseModel):

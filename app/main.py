@@ -1,4 +1,5 @@
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,19 @@ from fastapi.responses import JSONResponse
 from app.api import user, processing, admin, auth, drafts
 from app.api.policy import router as policy_router
 from app.config.logging_config import setup_logging
+
+if os.environ.get('DEBUG_MODE') == 'true':
+    import debugpy
+    if not debugpy.is_client_connected():
+        debugpy.listen(("0.0.0.0", 5678))
+        print("🐛 Debug mode enabled. Debugger listening on port 5678...")
+        print("🔗 VS Code: Connect to localhost:5678 to start debugging")
+
+        # Wait for debugger if explicitly requested
+        if os.environ.get('WAIT_FOR_DEBUGGER', 'false').lower() == 'true':
+            print("⏸️  Waiting for debugger to attach...")
+            debugpy.wait_for_client()
+            print("✅ Debugger attached! Starting application...")
 
 setup_logging()
 logger = logging.getLogger(__name__)

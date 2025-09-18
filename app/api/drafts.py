@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config.settings import settings
 from app.auth.entra_service import get_current_user
+from app.pipelines.components.llm import AzureLLM
 
 from app.services.draft_service import DraftService
 from app.services.draft_storage import DraftStorageService
@@ -19,8 +20,6 @@ from app.models.draft_models import (
     UpdateTOCRequest,
     GenerateContentRequest,
     UpdateContentRequest,
-    RegenerateRequest,
-    FinalizeTopicRequest,
     ExportRequest,
     DraftSummary,
     DraftListResponse,
@@ -267,41 +266,27 @@ async def generate_topic_content(
     """
     Generate content for a topic or subtopic.
     Uses RAG to find relevant content and generates with context.
+    Includes query classification, conversation history, and sequential context.
     """
     logger.info(f"Content generation for draft {draft_id}, topic {topic_id} by user: {current_user.get('email')}")
-    
+
     try:
-        # This will be implemented with the actual generation logic
-        # For now, returning placeholder
-        draft = draft_service.get_draft(draft_id)
-        if not draft:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Draft {draft_id} not found"
-            )
-        
-        # Build context
-        context = draft_service.build_sequential_context(
-            draft, 
-            topic_id, 
-            request.subtopic_id
+        # Use the complete generation service with all features
+        result = await draft_service.generate_content_for_topic(
+            draft_id=draft_id,
+            topic_id=topic_id,
+            user_prompt=request.user_prompt,
+            subtopic_id=request.subtopic_id,
+            vector_store=store,
+            llm_service=llm_service
         )
-        
-        # Placeholder for actual generation
-        generated_content = f"Generated content for topic with prompt: {request.user_prompt[:100]}..."
-        
-        # Update the content
-        success = draft_service.update_topic_content(
-            draft_id,
-            topic_id,
-            generated_content,
-            request.subtopic_id
-        )
-        
-        if success:
+
+        if result:
             return ContentGenerationResponse(
-                content=generated_content,
-                context_used=str(context)[:500],  # Preview of context
+                content=result.get("content", ""),
+                sources_used=result.get("sources_used", []),
+                summary=result.get("summary", ""),
+                word_count=result.get("word_count", 0),
                 message="Content generated successfully"
             )
         else:
@@ -325,19 +310,21 @@ async def update_topic_content(
     topic_id: str,
     request: UpdateContentRequest,
     draft_service: DraftService = Depends(get_draft_service),
+    llm_service: AzureLLM = Depends(get_llm_service),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Manually update topic or subtopic content."""
     logger.info(f"Manual content update for draft {draft_id}, topic {topic_id} by user: {current_user.get('email')}")
-    
+
     try:
-        success = draft_service.update_topic_content(
+        success = await draft_service.update_topic_content(
             draft_id,
             topic_id,
             request.content,
-            request.subtopic_id
+            request.subtopic_id,
+            llm_service
         )
-        
+
         if success:
             return {"message": "Content updated successfully"}
         else:
@@ -353,80 +340,6 @@ async def update_topic_content(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update content"
-        )
-
-@router.post("/{draft_id}/topics/{topic_id}/regenerate", response_model=ContentGenerationResponse)
-async def regenerate_topic_content(
-    draft_id: str,
-    topic_id: str,
-    request: RegenerateRequest,
-    draft_service: DraftService = Depends(get_draft_service),
-    store = Depends(get_vector_store),
-    llm_service = Depends(get_llm_service),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Regenerate content with a new prompt."""
-    logger.info(f"Content regeneration for draft {draft_id}, topic {topic_id} by user: {current_user.get('email')}")
-    
-    # Similar to generate but replaces existing content
-    return await generate_topic_content(
-        draft_id=draft_id,
-        topic_id=topic_id,
-        request=GenerateContentRequest(
-            user_prompt=request.user_prompt,
-            subtopic_id=request.subtopic_id
-        ),
-        draft_service=draft_service,
-        store=store,
-        llm_service=llm_service,
-        current_user=current_user
-    )
-
-@router.post("/{draft_id}/topics/{topic_id}/finalize")
-async def finalize_topic(
-    draft_id: str,
-    topic_id: str,
-    request: FinalizeTopicRequest,
-    draft_service: DraftService = Depends(get_draft_service),
-    llm_service = Depends(get_llm_service),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """
-    Mark topic as complete and optionally generate summary.
-    Summary is generated by LLM if content > 150 words.
-    """
-    logger.info(f"Finalizing topic {topic_id} in draft {draft_id} by user: {current_user.get('email')}")
-    
-    try:
-        draft = draft_service.get_draft(draft_id)
-        if not draft:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Draft {draft_id} not found"
-            )
-        
-        topic = draft_service.get_topic_by_id(draft, topic_id)
-        if not topic:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Topic {topic_id} not found"
-            )
-        
-        # Check if summary needed
-        if topic.get("summary") == "NEEDS_SUMMARY" and request.generate_summary:
-            # Here you would call LLM to generate actual summary
-            # For now, just marking as finalized
-            pass
-        
-        return {"message": "Topic finalized successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to finalize topic: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to finalize topic"
         )
 
 

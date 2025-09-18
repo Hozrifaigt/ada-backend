@@ -1,9 +1,4 @@
-"""
-Draft Service - Core business logic for draft management
-"""
-
 import uuid
-import json
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
@@ -11,16 +6,18 @@ from datetime import datetime, timezone
 
 from app.models.policy_models import SimilarPolicyRequest, PolicyMatch
 from app.models.draft_models import ClientMetadata, DraftMetadata, CompleteDraft
+from app.services.generation_service import ContentGenerationService
 
 logger = logging.getLogger(__name__)
 
 
 class DraftService:
     """Business logic service for draft management."""
-    
+
     def __init__(self, storage_service):
         """Initialize draft service with storage dependency."""
         self.storage = storage_service
+        self.generation_service = ContentGenerationService()
     
     async def initialize_draft_from_description(
         self,
@@ -71,15 +68,12 @@ class DraftService:
             #     merged_toc = self._merge_tocs_from_policies(similar_policies)
             #     draft_to_save.toc = merged_toc
             if similar_policies:
-                draft_to_save.toc = similar_policies[0].toc 
+                draft_to_save.toc = similar_policies[0].toc
 
             success = self.storage.create_draft(draft_to_save)
 
             if success:
                 logger.info(f"Initialized draft {draft_to_save.id} with {len(draft_to_save.toc)} suggested topics")
-                
-                # The API response still needs to be a dictionary, so we convert it here.
-
                 draft_dict = draft_to_save.model_dump()
 
                 return {
@@ -137,13 +131,13 @@ class DraftService:
                     for subtopic in topic['subtopics']:
                         subsection = {
                             "id": str(uuid.uuid4()),
-                            "title": subtopic.get('title', ''),
+                            "topic": subtopic.get('topic', ''),
                             "order": len(topic_details[topic_key]["subtopics"]) + 1,
                             "source_subtopic_id": subtopic.get('subtopic_id')
                         }
                         # Avoid duplicate subtopics
-                        existing_titles = [s['title'].lower() for s in topic_details[topic_key]["subtopics"]]
-                        if subsection['title'].lower() not in existing_titles:
+                        existing_titles = [s['topic'].lower() for s in topic_details[topic_key]["subtopics"]]
+                        if subsection['topic'].lower() not in existing_titles:
                             topic_details[topic_key]["subtopics"].append(subsection)
         
         # Sort by frequency and return as list
@@ -172,14 +166,10 @@ class DraftService:
             # Handle different possible input formats
             if isinstance(item, dict):
                 # Extract title from 'topic' field or 'title' field
-                title = item.get('title') or item.get('topic', f'Topic {idx}')
-                
-                # Clean up title if it contains tab-separated data or IDs
-                if '\t' in title:
-                    title = title.split('\t')[1] if len(title.split('\t')) > 1 else title.split('\t')[0]
+                title = item.get('topic', f'Topic {idx}')
                 
                 formatted_topic = {
-                    'id': item.get('id') or str(uuid.uuid4()),
+                    'topic_id': item.get('topic_id') or str(uuid.uuid4()),
                     'title': title.strip(),
                     'order': item.get('order', idx),
                     'source_topic_id': item.get('source_topic_id'),
@@ -192,10 +182,6 @@ class DraftService:
                     for sub_idx, subtopic in enumerate(subtopics, 1):
                         if isinstance(subtopic, dict):
                             sub_title = subtopic.get('title') or subtopic.get('topic', f'Subtopic {sub_idx}')
-                            
-                            # Clean up subtopic title
-                            if '\t' in sub_title:
-                                sub_title = sub_title.split('\t')[1] if len(sub_title.split('\t')) > 1 else sub_title.split('\t')[0]
                             
                             formatted_subtopic = {
                                 'id': subtopic.get('id') or str(uuid.uuid4()),
@@ -215,82 +201,77 @@ class DraftService:
         """
         try:
             logger.info(f"Starting TOC update for draft {draft_id}")
-            
-            draft = self.storage.get_draft(draft_id)
-            if not draft:
+
+            draft_model = self.storage.get_draft(draft_id)
+            if not draft_model:
                 logger.error(f"Draft {draft_id} not found for TOC update")
                 return False
-            
+
             logger.info(f"Successfully retrieved draft {draft_id}")
-            
+
             # Transform TOC data to match Pydantic model structure
             formatted_toc = self._format_toc_for_model(updated_toc)
-            
-            # Update TOC with formatted content
-            draft["toc"] = formatted_toc
-            draft["metadata"]["modified_at"] = datetime.now(timezone.utc).isoformat()
-            
-            logger.info(f"Updated TOC with {len(formatted_toc)} items")
-            
-            # Initialize topics array to match TOC structure
-            draft["topics"] = self._initialize_topics_from_toc(formatted_toc)
-            
-            logger.info(f"Initialized {len(draft['topics'])} topics")
-            
-            # Convert to CompleteDraft model for storage
-            try:
-                draft_model = CompleteDraft(**draft)
-                logger.info("Successfully converted draft to CompleteDraft model")
-            except Exception as model_error:
-                logger.error(f"Failed to convert to CompleteDraft model: {model_error}")
-                return False
-            
+
+            # Convert formatted TOC to TOCTopic models
+            from app.models.draft_models import TOCTopic, TOCSubtopic
+
+            toc_topics = []
+            for toc_item in formatted_toc:
+                # Convert subtopics
+                subtopics = []
+                for sub_item in toc_item.get('subtopics', []):
+                    subtopic = TOCSubtopic(
+                        subtopic_id=sub_item['id'],
+                        topic=sub_item['title'],
+                        order=sub_item['order'],
+                        source_subtopic_id=sub_item.get('source_subtopic_id'),
+                        content="",
+                        summary="",
+                        conversation_history=[]
+                    )
+                    subtopics.append(subtopic)
+
+                # Convert main topic
+                topic = TOCTopic(
+                    topic_id=toc_item['id'],
+                    topic=toc_item['title'],
+                    order=toc_item['order'],
+                    source_topic_id=toc_item.get('source_topic_id'),
+                    content="",
+                    summary="",
+                    conversation_history=[],
+                    subtopics=subtopics
+                )
+                toc_topics.append(topic)
+
+            # Update TOC in the model
+            draft_model.toc = toc_topics
+            draft_model.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+
+            logger.info(f"Updated TOC with {len(toc_topics)} topics")
+
             success = self.storage.update_draft(draft_id, draft_model)
-            
+
             if success:
-                logger.info(f"Successfully updated TOC for draft {draft_id} with {len(formatted_toc)} topics")
+                logger.info(f"Successfully updated TOC for draft {draft_id} with {len(toc_topics)} topics")
             else:
                 logger.error(f"Storage update failed for draft {draft_id}")
-            
+
             return success
-            
+
         except Exception as e:
             logger.error(f"Failed to update TOC for draft {draft_id}: {e}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
     
-    def _initialize_topics_from_toc(self, toc: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Initialize empty topics structure matching the TOC."""
-        topics = []
-        
-        for topic in toc:
-            # Handle different possible ID field names
-            topic_id = topic.get("id") or topic.get("topic_id") or str(uuid.uuid4())
-            
-            section = {
-                "id": topic_id,
-                "content": "",
-                "summary": "",
-                "subtopics": []
-            }
-
-            for subtopic in topic.get("subtopics", []):
-                # Handle different possible ID field names for subtopics too
-                subtopic_id = subtopic.get("id") or subtopic.get("subtopic_id") or str(uuid.uuid4())
-                section["subtopics"].append({
-                    "id": subtopic_id,
-                    "content": "",
-                    "summary": ""
-                })
-            
-            topics.append(section)
-        
-        return topics
     
     def get_draft(self, draft_id: str) -> Optional[Dict[str, Any]]:
         """Get a complete draft by ID."""
-        return self.storage.get_draft(draft_id)
+        draft_model = self.storage.get_draft(draft_id)
+        if draft_model:
+            return draft_model.model_dump()
+        return None
     
     def list_drafts(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -299,79 +280,131 @@ class DraftService:
         """
         return self.storage.list_all_drafts()
     
-    def update_topic_content(
+    async def update_topic_content(
         self,
         draft_id: str,
         topic_id: str,
         content: str,
-        subtopic_id: Optional[str] = None
+        subtopic_id: Optional[str] = None,
+        llm_service = None
     ) -> bool:
         """
-        Update content for a topic or subtopic.
-        Automatically creates summary if content > 150 words.
+        Update content for a topic or subtopic using typed models.
         """
         try:
-            draft = self.storage.get_draft(draft_id)
-            if not draft:
+            draft_model = self.storage.get_draft(draft_id)
+            if not draft_model:
                 logger.warning(f"Draft {draft_id} not found")
                 return False
 
-            # Find and update the topic
-            for topic in draft["topics"]:
-                if topic["id"] == topic_id:
-                    if subtopic_id:
-                        # Update subtopic
-                        for subtopic in topic["subtopics"]:
-                            if subtopic["id"] == subtopic_id:
-                                subtopic["content"] = content
-                                subtopic["summary"] = self._create_summary_if_needed(content)
-                                break
-                    else:
-                        # Update main topic
-                        topic["content"] = content
-                        topic["summary"] = self._create_summary_if_needed(content)
-                    
-                    # Update modified timestamp
-                    draft["metadata"]["modified_at"] = datetime.now(timezone.utc).isoformat()
-                    
-                    # Save updated draft
-                    return self.storage.update_draft(draft_id, draft)
+            # Find and update in the TOC structure
+            topic_found = False
 
-            logger.warning(f"Topic {topic_id} not found in draft {draft_id}")
-            return False
-            
+            for toc_topic in draft_model.toc:
+                if toc_topic.topic_id == topic_id:
+                    topic_found = True
+
+                    if subtopic_id:
+                        # Update subtopic content
+                        subtopic_found = False
+                        for toc_subtopic in toc_topic.subtopics:
+                            if toc_subtopic.subtopic_id == subtopic_id:
+                                toc_subtopic.content = content
+                                # Generate LLM summary if content > 150 words and LLM service available
+                                if llm_service:
+                                    toc_subtopic.summary = await self.generation_service.generate_summary(
+                                        content=content,
+                                        title=toc_subtopic.topic,
+                                        llm_service=llm_service
+                                    )
+                                else:
+                                    toc_subtopic.summary = self._create_simple_summary_for_context(content)
+                                subtopic_found = True
+                                logger.info(f"Updated subtopic {subtopic_id} content")
+                                break
+
+                        if not subtopic_found:
+                            logger.warning(f"Subtopic {subtopic_id} not found in topic {topic_id}")
+                            return False
+                    else:
+                        # Update main topic content
+                        toc_topic.content = content
+                        # Generate LLM summary if content > 150 words and LLM service available
+                        if llm_service:
+                            toc_topic.summary = await self.generation_service.generate_summary(
+                                content=content,
+                                title=toc_topic.topic,
+                                llm_service=llm_service
+                            )
+                        else:
+                            toc_topic.summary = self._create_simple_summary_for_context(content)
+                        logger.info(f"Updated topic {topic_id} content")
+                    break
+
+            if not topic_found:
+                logger.warning(f"Topic {topic_id} not found in draft {draft_id}")
+                return False
+
+            # Update modified timestamp
+            draft_model.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+
+            # Save the updated model
+            success = self.storage.update_draft(draft_id, draft_model)
+
+            if success:
+                logger.info(f"Successfully saved content for topic {topic_id}" +
+                           (f", subtopic {subtopic_id}" if subtopic_id else ""))
+            else:
+                logger.error(f"Storage update failed for draft {draft_id}")
+
+            return success
+
         except Exception as e:
             logger.error(f"Failed to update topic content: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
-    
-    def _create_summary_if_needed(self, content: str) -> str:
+
+    def _create_simple_summary_for_context(self, content: str) -> str:
         """
-        Create summary placeholder if content > 150 words.
-        Actual summary generation will be done by LLM during context building.
+        Create a simple summary for context building by truncating content > 150 words.
+        This is used for context building when full content would be too long.
         """
         if not content:
             return ""
-        
+
         word_count = len(content.split())
         if word_count > 150:
-            # Return a marker that indicates summary should be generated
-            # Actual summary will be created by LLM when needed
-            return "NEEDS_SUMMARY"
-        
-        return ""
+            # Take first 150 words as summary for context
+            words = content.split()
+            return " ".join(words[:150]) + "..."
 
-    def get_topic_by_id(self, draft: Dict[str, Any], topic_id: str) -> Optional[Dict[str, Any]]:
-        """Get a topic from draft by its ID."""
-        for topic in draft.get("topics", []):
-            if topic["id"] == topic_id:
-                return topic
-        return None
-    
+        return ""  # No summary needed for short content
+
     def get_toc_item_by_id(self, draft: Dict[str, Any], item_id: str) -> Optional[Dict[str, Any]]:
         """Get a TOC item (topic) by its ID."""
-        for topic in draft.get("toc", []):
-            if topic["id"] == item_id:
-                return topic
+        # Convert to model if needed for compatibility
+        if isinstance(draft, dict):
+            draft_model = CompleteDraft(**draft)
+        else:
+            draft_model = draft
+
+        for toc_topic in draft_model.toc:
+            if toc_topic.topic_id == item_id:
+                return {
+                    "id": toc_topic.topic_id,
+                    "topic": toc_topic.topic,
+                    "title": toc_topic.topic,  # For backward compatibility
+                    "order": toc_topic.order,
+                    "subtopics": [
+                        {
+                            "id": sub.subtopic_id,
+                            "topic": sub.topic,
+                            "title": sub.topic  # For backward compatibility
+                        }
+                        for sub in toc_topic.subtopics
+                    ]
+                }
         return None
     
     def build_sequential_context(
@@ -383,72 +416,77 @@ class DraftService:
         """
         Build context from all previous topics up to the target.
         Returns structured context for LLM consumption.
+        Note: Still accepts dict for API compatibility but works with typed structure internally.
         """
+        # Convert to model if needed
+        if isinstance(draft, dict):
+            draft_model = CompleteDraft(**draft)
+        else:
+            draft_model = draft
+
         context_parts = {
             "document_context": {
-                "title": draft["metadata"]["title"],
-                "description": draft["metadata"]["description"],
-                "client_metadata": draft["metadata"].get("client_metadata", {})
+                "title": draft_model.metadata.title,
+                "description": draft_model.metadata.description,
+                "client_metadata": draft_model.metadata.client_metadata.model_dump() if draft_model.metadata.client_metadata else {}
             },
             "previous_topics": [],
             "current_topic_toc": None
         }
-        
+
         # Find target position in TOC
         target_found = False
-        
-        for toc_item in draft["toc"]:
+
+        for toc_topic in draft_model.toc:
             if target_found:
                 break
 
-            topic = self.get_topic_by_id(draft, toc_item["id"])
-            if not topic:
-                continue
-
-            if toc_item["id"] == target_topic_id:
-                context_parts["current_topic_toc"] = toc_item
+            if toc_topic.topic_id == target_topic_id:
+                context_parts["current_topic_toc"] = {
+                    "topic_id": toc_topic.topic_id,
+                    "topic": toc_topic.topic,
+                    "order": toc_topic.order
+                }
 
                 if target_subtopic_id:
                     # Include main topic content if generating subtopic
-                    if topic["content"]:
+                    if toc_topic.content:
                         context_parts["current_topic_content"] = {
-                            "title": toc_item["title"],
-                            "content": topic["content"] if topic["summary"] == "" else topic["summary"]
+                            "title": toc_topic.topic,
+                            "content": toc_topic.content if not toc_topic.summary else toc_topic.summary
                         }
 
                     # Include previous subtopics of current topic
-                    for sub_toc in toc_item.get("subtopics", []):
-                        if sub_toc["id"] == target_subtopic_id:
+                    for toc_subtopic in toc_topic.subtopics:
+                        if toc_subtopic.subtopic_id == target_subtopic_id:
                             break
 
-                        for subtopic in topic.get("subtopics", []):
-                            if subtopic["id"] == sub_toc["id"] and subtopic["content"]:
-                                context_parts["previous_topics"].append({
-                                    "title": f"{toc_item['title']} - {sub_toc['title']}",
-                                    "content": subtopic["content"] if subtopic["summary"] == "" else subtopic["summary"],
-                                    "is_subtopic": True
-                                })
-                
+                        if toc_subtopic.content:
+                            context_parts["previous_topics"].append({
+                                "title": f"{toc_topic.topic} - {toc_subtopic.topic}",
+                                "content": toc_subtopic.content if not toc_subtopic.summary else toc_subtopic.summary,
+                                "is_subtopic": True
+                            })
+
                 target_found = True
             else:
                 # Add all content from topics before target
-                if topic["content"]:
+                if toc_topic.content:
                     context_parts["previous_topics"].append({
-                        "title": toc_item["title"],
-                        "content": topic["content"] if topic["summary"] == "" else topic["summary"],
+                        "title": toc_topic.topic,
+                        "content": toc_topic.content if not toc_topic.summary else toc_topic.summary,
                         "is_subtopic": False
                     })
-                
+
                 # Add subtopics
-                for sub_toc in toc_item.get("subtopics", []):
-                    for subtopic in topic.get("subtopics", []):
-                        if subtopic["id"] == sub_toc["id"] and subtopic["content"]:
-                            context_parts["previous_topics"].append({
-                                "title": f"{toc_item['title']} - {sub_toc['title']}",
-                                "content": subtopic["content"] if subtopic["summary"] == "" else subtopic["summary"],
-                                "is_subtopic": True
-                            })
-        
+                for toc_subtopic in toc_topic.subtopics:
+                    if toc_subtopic.content:
+                        context_parts["previous_topics"].append({
+                            "title": f"{toc_topic.topic} - {toc_subtopic.topic}",
+                            "content": toc_subtopic.content if not toc_subtopic.summary else toc_subtopic.summary,
+                            "is_subtopic": True
+                        })
+
         return context_parts
     
     def delete_draft(self, draft_id: str) -> bool:
@@ -536,6 +574,7 @@ class DraftService:
                 logger.error(f"Draft {draft_id} not found")
                 return None
             
+
             # Generate content using the generation service
             content, source_ids = await self.generation_service.generate_topic_content(
                 draft=draft,
@@ -545,14 +584,9 @@ class DraftService:
                 vector_store=vector_store,
                 llm_service=llm_service
             )
-            
-            # Update the draft with generated content
-            success = self.update_topic_content(
-                draft_id=draft_id,
-                topic_id=topic_id,
-                content=content,
-                subtopic_id=subtopic_id
-            )
+
+            # Save the entire modified draft (includes conversation history and content)
+            success = self.storage.update_draft(draft_id, draft)
             
             if success:
                 # Check if we need to generate a summary
@@ -560,8 +594,7 @@ class DraftService:
                 summary = ""
                 if word_count > 150:
                     # Get the topic title for summary generation
-                    draft = self.storage.get_draft(draft_id)  # Refresh draft
-                    toc_item = self.get_toc_item_by_id(draft, topic_id)
+                    toc_item = self.get_toc_item_by_id(draft.model_dump(), topic_id)
                     
                     if subtopic_id:
                         # Find subtopic title
@@ -577,9 +610,21 @@ class DraftService:
                         title=title,
                         llm_service=llm_service
                     )
-                    
-                    # Update summary in draft
-                    self._update_summary(draft_id, topic_id, subtopic_id, summary)
+
+                    # Update summary directly in the draft object
+                    for toc_topic in draft.toc:
+                        if toc_topic.topic_id == topic_id:
+                            if subtopic_id:
+                                for toc_subtopic in toc_topic.subtopics:
+                                    if toc_subtopic.subtopic_id == subtopic_id:
+                                        toc_subtopic.summary = summary
+                                        break
+                            else:
+                                toc_topic.summary = summary
+                            break
+
+                    # Save the draft again with the summary
+                    self.storage.update_draft(draft_id, draft)
                 
                 return {
                     "content": content,
@@ -604,24 +649,24 @@ class DraftService:
     ) -> bool:
         """Update the summary for a topic or subtopic."""
         try:
-            draft = self.storage.get_draft(draft_id)
-            if not draft:
+            draft_model = self.storage.get_draft(draft_id)
+            if not draft_model:
                 return False
-            
-            for topic in draft["topics"]:
-                if topic["id"] == topic_id:
+
+            for toc_topic in draft_model.toc:
+                if toc_topic.topic_id == topic_id:
                     if subtopic_id:
-                        for subtopic in topic["subtopics"]:
-                            if subtopic["id"] == subtopic_id:
-                                subtopic["summary"] = summary
+                        for toc_subtopic in toc_topic.subtopics:
+                            if toc_subtopic.subtopic_id == subtopic_id:
+                                toc_subtopic.summary = summary
                                 break
                     else:
-                        topic["summary"] = summary
-                    
-                    return self.storage.update_draft(draft_id, draft)
-            
+                        toc_topic.summary = summary
+
+                    return self.storage.update_draft(draft_id, draft_model)
+
             return False
-            
+
         except Exception as e:
             logger.error(f"Failed to update summary: {e}")
             return False
@@ -629,30 +674,30 @@ class DraftService:
     def get_draft_progress(self, draft_id: str) -> Dict[str, Any]:
         """Calculate draft completion progress."""
         try:
-            draft = self.storage.get_draft(draft_id)
-            if not draft:
+            draft_model = self.storage.get_draft(draft_id)
+            if not draft_model:
                 return {"error": "Draft not found"}
-            
+
             total_items = 0
             completed_items = 0
-            
-            for topic in draft.get("topics", []):
+
+            for toc_topic in draft_model.toc:
                 total_items += 1
-                if topic.get("content"):
+                if toc_topic.content:
                     completed_items += 1
-                
-                for subtopic in topic.get("subtopics", []):
+
+                for toc_subtopic in toc_topic.subtopics:
                     total_items += 1
-                    if subtopic.get("content"):
+                    if toc_subtopic.content:
                         completed_items += 1
-            
+
             return {
                 "total": total_items,
                 "completed": completed_items,
                 "percentage": (completed_items / total_items * 100) if total_items > 0 else 0,
                 "remaining": total_items - completed_items
             }
-            
+
         except Exception as e:
             logger.error(f"Failed to calculate progress for draft {draft_id}: {e}")
             return {"error": "Failed to calculate progress"}

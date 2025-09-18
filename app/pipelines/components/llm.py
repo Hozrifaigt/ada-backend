@@ -21,7 +21,7 @@ class AzureLLM:
         )
         
         self.prompt_manager = prompt_manager
-        self.summarize_prompt = prompt_manager.get_prompt("summarize_document")
+        self.summarize_prompt = prompt_manager.get_prompt_template("summarize_document")
         self.chunk_size = settings.LLM_CHUNK_SIZE
 
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -31,7 +31,22 @@ class AzureLLM:
 
         
         logger.info("Production AzureLLM initialized with custom prompts")
-    
+
+    async def generate(self, prompt: str) -> str:
+        """Generate content based on a text prompt."""
+        try:
+            # Create a simple user message from the prompt
+            messages = [{"role": "user", "content": prompt}]
+            result = await self.client.ainvoke(messages)
+
+            generated_content = result.content.strip() if result.content else "No content generated"
+            logger.debug(f"Generated content: {len(generated_content)} characters")
+            return generated_content
+
+        except Exception as e:
+            logger.error(f"Content generation failed: {e}")
+            raise
+
     async def asummarize_document(self, text: str) -> str:
         """Generate document summary using custom prompt with recursive chunking."""
         if not text or not text.strip():
