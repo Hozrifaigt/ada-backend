@@ -29,6 +29,7 @@ services:
     container_name: ada_server
     ports:
       - "8080:8000"
+      - "5678:5678"  # Debug port
     volumes:
       - ./app:/code/app
       - ../ADA_DATA/client_data:/code/data/client_data
@@ -39,6 +40,9 @@ services:
       - policy_network
     env_file:
       - ./env/.env.dev
+    environment:
+      - DEBUG_MODE=true  # Enable debug mode
+      - PROMPT_MANAGER_PATH=/code/app/prompts/prompts.v1.yml
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 networks:

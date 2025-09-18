@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    container_name: ada_server_debug
+    ports:
+      - "8080:8000"
+      - "5678:5678"  # Debug port for debugpy
+    volumes:
+      - ./app:/code/app
+      - ../ADA_DATA/client_data:/code/data/client_data
+    networks:
+      - policy_network
+    env_file:
+      - ./env/.env.dev
+    environment:
+      - DEBUG_MODE=true
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - WAIT_FOR_DEBUGGER=true  # Set to 'true' to wait for debugger before starting
+      - PROMPT_MANAGER_PATH=/code/app/prompts/prompts.v1.yml
+    # Use python directly instead of uvicorn for better debugging control
+    command: python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    stdin_open: true
+    tty: true
+
+networks:
+  policy_network:
+    driver: bridge
