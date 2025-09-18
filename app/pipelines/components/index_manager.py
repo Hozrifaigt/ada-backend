@@ -56,7 +56,7 @@ class AzureSearchIndexManager:
             
             fields = [
                 # Common fields
-                SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+                SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
                 SimpleField(name="record_type", type=SearchFieldDataType.String, filterable=True, facetable=True),
                 
                 # Policy-specific fields (WITH vector for similarity search)
@@ -73,14 +73,21 @@ class AzureSearchIndexManager:
                 SimpleField(name="toc", type=SearchFieldDataType.String, searchable=False),
                 SimpleField(name="topic_ids", type=SearchFieldDataType.Collection(SearchFieldDataType.String), filterable=False),
                 
-                # Topic-specific fields (NO vectors - retrieval by ID only)
+                # Topic-specific fields (WITH vectors for similarity search)
                 SimpleField(name="policy_id", type=SearchFieldDataType.String, filterable=True),
                 SearchableField(name="topic", type=SearchFieldDataType.String, searchable=True, filterable=True, sortable=True),
-                SimpleField(name="topic_content", type=SearchFieldDataType.String, searchable=False),  # Not searchable, just storage
+                SearchableField(name="topic_content", type=SearchFieldDataType.String, searchable=True, analyzer_name="en.microsoft"),
+                SearchField(
+                    name="topic_vector",
+                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+                    searchable=True,
+                    vector_search_dimensions=settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS,
+                    vector_search_profile_name="default-vector-profile"
+                ),
                 SimpleField(name="subtopics", type=SearchFieldDataType.String, searchable=False)  # JSON string, no vectors
             ]
             
-            # Vector search configuration (only for policy descriptions)
+            # Vector search configuration (for policy descriptions and topic content)
             vector_search = VectorSearch(
                 algorithms=[
                     HnswAlgorithmConfiguration(
@@ -127,7 +134,7 @@ class AzureSearchIndexManager:
             
             result = self.index_client.create_index(index)
             logger.info(f"Successfully created simplified RAG index: {result.name}")
-            logger.info("Note: Vector search enabled only for policy descriptions")
+            logger.info("Note: Vector search enabled for policy descriptions and topic content")
                        
             return True
             

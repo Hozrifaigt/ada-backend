@@ -60,10 +60,11 @@ class AzureVectorStore:
             "description_vector": [],
             "toc": "[]",
             "topic_ids": [],
-            # Topic fields (no vectors)
+            # Topic fields (with vectors)
             "policy_id": "",
             "topic": "",
             "topic_content": "",
+            "topic_vector": [],
             "subtopics": "[]"
         }
     
@@ -88,23 +89,24 @@ class AzureVectorStore:
         return search_doc
     
     def _create_topic_document(self, topic_doc: Dict[str, Any]) -> Dict[str, Any]:
-        """Create topic document without vectors - retrieval by ID only."""
+        """Create topic document with vectors for similarity search."""
         search_doc = self._create_base_document(topic_doc.get("id"))
-        
+
         # Subtopics already come as JSON string from pipeline
         subtopics_json = topic_doc.get('subtopics', '[]')
         if not isinstance(subtopics_json, str):
             subtopics_json = json.dumps(subtopics_json)
-        
+
         search_doc.update({
             "record_type": "topic",
             "policy_id": topic_doc.get('policy_id', ''),
             "source": topic_doc.get('source', ''),
             "topic": topic_doc.get('topic', ''),
             "topic_content": topic_doc.get('topic_content', ''),
+            "topic_vector": topic_doc.get('topic_vector', []),
             "subtopics": subtopics_json
         })
-        
+
         return search_doc
     
     def _upload_batch(self, documents: List[Dict[str, Any]]) -> UploadResult:
@@ -242,7 +244,54 @@ class AzureVectorStore:
         except Exception as e:
             logger.error(f"Failed to search similar policies: {e}")
             return []
-    
+
+    def search_similar_topics(self, query_vector: List[float], threshold: float = 0.6, top_k: int = 5) -> List[Dict]:
+        """
+        Search for similar topics using vector similarity on topic content.
+        """
+        try:
+            from azure.search.documents.models import VectorizedQuery
+
+            vector_query = VectorizedQuery(
+                vector=query_vector,
+                k_nearest_neighbors=top_k,
+                fields="topic_vector"
+            )
+
+            results = self.search_client.search(
+                search_text="",
+                vector_queries=[vector_query],
+                filter="record_type eq 'topic'",
+                select="id,policy_id,topic,topic_content,subtopics,source",
+                top=top_k
+            )
+
+            processed_results = []
+            for i, result in enumerate(results):
+                # Parse subtopics JSON
+                subtopics = json.loads(result.get("subtopics", "[]"))
+
+                # Calculate similarity score (rank-based for simplicity)
+                similarity_score = max(95 - (i * 10), 10) / 100
+
+                if similarity_score >= threshold:
+                    processed_results.append({
+                        "id": result["id"],
+                        "policy_id": result["policy_id"],
+                        "topic": result["topic"],
+                        "topic_content": result["topic_content"],
+                        "subtopics": subtopics,
+                        "source": result["source"],
+                        "similarity_score": similarity_score,
+                        "rank": i + 1
+                    })
+
+            return processed_results
+
+        except Exception as e:
+            logger.error(f"Failed to search similar topics: {e}")
+            return []
+
     def get_topic_by_id(self, topic_id: str) -> Optional[Dict]:
         """
         Get a topic document by its ID - direct lookup, no vector search.

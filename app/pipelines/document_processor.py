@@ -198,7 +198,7 @@ class DocumentProcessor:
         
         # Method 2: Check paragraph properties (outline level)
         try:
-            if para._element.pPr and para._element.pPr.outlineLvl:
+            if para._element.pPr is not None and para._element.pPr.outlineLvl is not None:
                 return True, para._element.pPr.outlineLvl.val + 1
         except:
             pass

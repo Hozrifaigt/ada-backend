@@ -68,21 +68,37 @@ class IndexingPipeline:
                     logger.warning(f"Empty document: {file_path.name}")
                     continue
                 
-                # Process topic documents (no embeddings needed)
+                # Process topic documents (with embeddings for similarity search)
                 policy_id = str(uuid.uuid4())
                 processed_topic_docs = []
-                
+
+                # Generate embeddings for all topic contents
+                topic_contents = []
+                topic_docs_data = []
+
                 for topic_data in topics:
-                    # Simply create topic document without embeddings
-                    topic_doc = {
+                    topic_content = topic_data.get("topic_content", "")
+                    topic_contents.append(topic_content)
+                    topic_docs_data.append({
                         "id": topic_data["id"],
                         "policy_id": policy_id,
                         "source": str(file_path),
                         "topic": topic_data["topic"],
-                        "topic_content": topic_data.get("topic_content", ""),
+                        "topic_content": topic_content,
                         "subtopics": json.dumps(topic_data.get("subtopics", []))  # Store as JSON string
-                    }
-                    processed_topic_docs.append(topic_doc)
+                    })
+
+                # Generate embeddings for all topic contents at once
+                if topic_contents:
+                    logger.info(f"Generating embeddings for {len(topic_contents)} topics")
+                    topic_embeddings = self.embedder.embed_documents(topic_contents)
+
+                    # Add embeddings to topic documents
+                    for i, topic_doc_data in enumerate(topic_docs_data):
+                        topic_doc_data["topic_vector"] = topic_embeddings[i]
+                        processed_topic_docs.append(topic_doc_data)
+                else:
+                    processed_topic_docs = topic_docs_data
                 
                 # Store topic IDs for policy reference
                 topic_ids = [doc["id"] for doc in processed_topic_docs]
@@ -113,14 +129,12 @@ class IndexingPipeline:
         
         for policy_doc in tqdm(all_policy_docs, desc="Summarizing policies"):
             try:
-                # Generate summary
-                full_text = policy_doc.pop("full_text")  # Remove full text after using
+                full_text = policy_doc.pop("full_text")
                 logger.info(f"Generating summary for {policy_doc['filename']}")
                 summary = await self.llm.asummarize_document(full_text)
                 
                 policy_doc["description"] = summary
                 
-                # Generate embedding for policy summary ONLY
                 policy_doc["description_vector"] = self.embedder.embed_query(summary)
                 
                 logger.info(f"Summarized {policy_doc['filename']}: {len(summary)} chars")
