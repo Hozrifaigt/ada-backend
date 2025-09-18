@@ -79,12 +79,16 @@ adapt_existing_content:
     USER REQUIREMENTS:
     {user_requirements}
 
+    CONVERSATION HISTORY:
+    {conversation_history}
+
     INSTRUCTIONS:
     1. Adapt the existing content to meet the user's specific requirements
-    2. Maintain consistency with previous topics
+    2. Maintain consistency with previous topics and conversation history
     3. Do not repeat information already covered
     4. Keep the professional tone and structure
     5. Ensure the content flows naturally from previous topics
+    6. Consider the context from previous conversations
 
     ADAPTED CONTENT:
 
@@ -109,6 +113,9 @@ generate_with_references:
     SIMILAR TOPICS FROM KNOWLEDGE BASE:
     {similar_topics}
 
+    CONVERSATION HISTORY:
+    {conversation_history}
+
     INSTRUCTIONS:
     1. Create comprehensive content for "{topic_title}" based on the user requirements
     2. Use the similar topics as reference but adapt to the specific context
@@ -116,6 +123,7 @@ generate_with_references:
     4. Ensure no repetition of information from previous topics
     5. Maintain professional policy language and structure
     6. Include specific details relevant to the organization's context
+    7. Consider the context from previous conversations
 
     CONTENT:
 
@@ -140,6 +148,9 @@ generate_with_references:
     SIMILAR TOPICS FROM KNOWLEDGE BASE:
     {similar_topics}
 
+    CONVERSATION HISTORY:
+    {conversation_history}
+
     INSTRUCTIONS:
     1. Create comprehensive content for "{topic_title}" based on the user requirements
     2. Use the similar topics as reference but adapt to the specific context
@@ -147,6 +158,39 @@ generate_with_references:
     4. Ensure no repetition of information from previous topics
     5. Maintain professional policy language and structure
     6. Include specific details relevant to the organization's context
+    7. Consider the context from previous conversations
+
+    CONTENT:
+
+
+generate_from_scratch:
+  template: |
+    You are creating a new policy topic from scratch.
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Description: {document_description}
+
+    TOPIC TO CREATE:
+    {topic_title}
+
+    USER REQUIREMENTS:
+    {user_requirements}
+
+    PREVIOUS TOPICS SUMMARY:
+    {previous_topics}
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    INSTRUCTIONS:
+    1. Create comprehensive content for "{topic_title}" based on the user requirements
+    2. Since no existing references are available, use best practices and industry standards
+    3. Ensure consistency with previous topics
+    4. Do not repeat information already covered
+    5. Maintain professional policy language and structure
+    6. Include specific actionable guidelines
+    7. Consider the context from previous conversations
 
     CONTENT:
 
@@ -167,3 +211,31 @@ generate_summary:
     4. Use clear, professional language
 
     SUMMARY:
+
+
+classify_query:
+  template: |
+    You are a content filter for a policy document generation system. Your job is to determine if a user's request is legitimate for generating policy content.
+
+    DOCUMENT CONTEXT:
+    - Document: {document_title}
+    - Current Topic: {topic_title}
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    CURRENT USER REQUEST:
+    "{user_query}"
+
+    CLASSIFICATION CATEGORIES:
+    - LEGITIMATE_REQUEST: Valid requests for policy content, explanations, improvements, etc.
+    - SMALL_TALK: Casual conversation, greetings, personal questions unrelated to work
+    - INAPPROPRIATE: Offensive, harmful, or unethical content
+
+    Consider the conversation context when making your decision. A request might seem off-topic but could be legitimate given the conversation flow.
+
+    Respond in this exact format:
+    CATEGORY: [category]
+    CONFIDENCE: [0.0-1.0]
+    REASON: [brief explanation]
+    SHOULD_PROCEED: [true/false]

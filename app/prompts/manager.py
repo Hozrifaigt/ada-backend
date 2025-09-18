@@ -21,13 +21,30 @@ class PromptManager:
         with open(self.filepath, 'r') as f:
             return yaml.safe_load(f)
 
-    def get_prompt(self, name: str) -> ChatPromptTemplate:
+    def get_prompt(self, name: str, **kwargs) -> str:
+        """Get a prompt template and format it with the provided variables."""
         prompt_config = self._prompts.get(name)
         if not prompt_config:
             raise ValueError(f"Prompt '{name}' not found in {self.filepath.name}")
-        
+
         template = prompt_config.get("template")
         if not template:
             raise ValueError(f"Prompt '{name}' in {self.filepath.name} is missing a 'template' key.")
-        
+
+        # Format the template string with the provided variables
+        try:
+            return template.format(**kwargs)
+        except KeyError as e:
+            raise ValueError(f"Missing required variable {e} for prompt '{name}'")
+
+    def get_prompt_template(self, name: str) -> ChatPromptTemplate:
+        """Get the raw ChatPromptTemplate object."""
+        prompt_config = self._prompts.get(name)
+        if not prompt_config:
+            raise ValueError(f"Prompt '{name}' not found in {self.filepath.name}")
+
+        template = prompt_config.get("template")
+        if not template:
+            raise ValueError(f"Prompt '{name}' in {self.filepath.name} is missing a 'template' key.")
+
         return ChatPromptTemplate.from_template(template)
