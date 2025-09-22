@@ -64,11 +64,9 @@ class DraftService:
                 toc=[]
             )
 
-            # if similar_policies:
-            #     merged_toc = self._merge_tocs_from_policies(similar_policies)
-            #     draft_to_save.toc = merged_toc
             if similar_policies:
-                draft_to_save.toc = similar_policies[0].toc
+                # Transform the TOC to properly set source_topic_id and source_subtopic_id
+                draft_to_save.toc = self._transform_toc_for_draft(similar_policies[0].toc)
 
             success = self.storage.create_draft(draft_to_save)
 
@@ -91,7 +89,45 @@ class DraftService:
         except Exception as e:
             logger.error(f"Failed to initialize draft: {e}")
             return None
- 
+
+    def _transform_toc_for_draft(self, toc_from_policy: List[Dict[str, Any]]) -> List:
+        """
+        Transform TOC from similar policy to draft format.
+        Creates new IDs for draft while preserving source IDs from vector DB.
+        """
+        from app.models.draft_models import TOCTopic, TOCSubtopic
+
+        transformed_toc = []
+        for topic_item in toc_from_policy:
+            # Create subtopics with new IDs but preserve source IDs
+            subtopics = []
+            for sub in topic_item.get('subtopics', []):
+                subtopic = TOCSubtopic(
+                    subtopic_id=str(uuid.uuid4()),  # New ID for draft
+                    topic=sub.get('topic', ''),
+                    order=sub.get('order', 0),
+                    source_subtopic_id=sub.get('subtopic_id'),  # Preserve vector DB ID
+                    content="",
+                    summary="",
+                    conversation_history=[]
+                )
+                subtopics.append(subtopic)
+
+            # Create topic with new ID but preserve source ID
+            topic = TOCTopic(
+                topic_id=str(uuid.uuid4()),  # New ID for draft
+                topic=topic_item.get('topic', ''),
+                order=topic_item.get('order', 0),
+                source_topic_id=topic_item.get('topic_id'),  # Preserve vector DB ID
+                content="",
+                summary="",
+                conversation_history=[],
+                subtopics=subtopics
+            )
+            transformed_toc.append(topic)
+
+        return transformed_toc
+
     def _merge_tocs_from_policies(self, policies: List[PolicyMatch]) -> List[Dict[str, Any]]:
         """
         Extract and merge TOCs from similar policies.
@@ -120,7 +156,7 @@ class DraftService:
                         "id": str(uuid.uuid4()),
                         "topic": topic.get('topic', ''),
                         "order": len(topic_details) + 1,
-                        "source_topic_id": topic.get('source_topic_id', ''),
+                        "source_topic_id": topic.get('topic_id', ''),  # Use topic_id from vector DB as source
                         "source_policy_id": policy.policy_id,  # PolicyMatch is a Pydantic model, use attribute access
                         "subtopics": []
                     }
@@ -133,7 +169,7 @@ class DraftService:
                             "id": str(uuid.uuid4()),
                             "topic": subtopic.get('topic', ''),
                             "order": len(topic_details[topic_key]["subtopics"]) + 1,
-                            "source_subtopic_id": subtopic.get('subtopic_id')
+                            "source_subtopic_id": subtopic.get('subtopic_id', '')  # Use subtopic_id from vector DB as source
                         }
                         # Avoid duplicate subtopics
                         existing_titles = [s['topic'].lower() for s in topic_details[topic_key]["subtopics"]]
@@ -169,10 +205,10 @@ class DraftService:
                 title = item.get('topic', f'Topic {idx}')
                 
                 formatted_topic = {
-                    'topic_id': item.get('topic_id') or str(uuid.uuid4()),
+                    'topic_id': item.get('id') or str(uuid.uuid4()),  # Use 'id' for draft topic ID
                     'title': title.strip(),
                     'order': item.get('order', idx),
-                    'source_topic_id': item.get('source_topic_id'),
+                    'source_topic_id': item.get('source_topic_id'),  # Preserve source_topic_id if it exists
                     'subtopics': []
                 }
                 
@@ -187,7 +223,7 @@ class DraftService:
                                 'id': subtopic.get('id') or str(uuid.uuid4()),
                                 'title': sub_title.strip(),
                                 'order': subtopic.get('order', sub_idx),
-                                'source_subtopic_id': subtopic.get('source_subtopic_id')
+                                'source_subtopic_id': subtopic.get('source_subtopic_id')  # Preserve source_subtopic_id if it exists
                             }
                             formatted_topic['subtopics'].append(formatted_subtopic)
                 
@@ -233,7 +269,7 @@ class DraftService:
 
                 # Convert main topic
                 topic = TOCTopic(
-                    topic_id=toc_item['id'],
+                    topic_id=toc_item['topic_id'],  # Use topic_id, not id
                     topic=toc_item['title'],
                     order=toc_item['order'],
                     source_topic_id=toc_item.get('source_topic_id'),
