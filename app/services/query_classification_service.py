@@ -106,9 +106,9 @@ class QueryClassificationService:
         """Classify query using LLM-based approach with conversation history."""
         try:
             # Import here to avoid circular imports
-            from app.api.policy.dependencies import get_llm_service
+            from app.api.policy.dependencies import get_llm
 
-            llm_service = get_llm_service()
+            llm_service = get_llm()
 
             # Create classification prompt
             prompt = self._create_classification_prompt(user_query, context, conversation_history)

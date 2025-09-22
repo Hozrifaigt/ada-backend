@@ -99,6 +99,13 @@ class ContentGenerationService:
                         conversation_history=formatted_history,
                         llm_service=llm_service
                     )
+
+                    # Add conversation to draft history before returning
+                    logger.info(f"DEBUG: About to add conversation for topic {topic_id}, subtopic {subtopic_id} (adapted content path)")
+                    self._add_conversation_to_draft(
+                        draft, topic_id, user_prompt, adapted_content, subtopic_id
+                    )
+
                     return adapted_content, [source_id]
 
             # Step 5: Search for similar topics (for custom topics)
@@ -137,9 +144,20 @@ class ContentGenerationService:
                 source_ids = []
 
             # Step 8: Add conversation to draft history
+            logger.info(f"DEBUG: About to add conversation for topic {topic_id}, subtopic {subtopic_id}")
             self._add_conversation_to_draft(
                 draft, topic_id, user_prompt, content, subtopic_id
             )
+
+            # Verify conversation was added
+            topic = self._find_toc_item(draft.toc, topic_id)
+            if topic:
+                if subtopic_id:
+                    subtopic = self._find_subtopic(topic, subtopic_id)
+                    if subtopic:
+                        logger.info(f"DEBUG: After adding conversation - subtopic {subtopic_id} now has {len(subtopic.conversation_history)} entries")
+                else:
+                    logger.info(f"DEBUG: After adding conversation - topic {topic_id} now has {len(topic.conversation_history)} entries")
 
             return content, source_ids
 

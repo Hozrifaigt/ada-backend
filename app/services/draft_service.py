@@ -611,6 +611,18 @@ class DraftService:
                 return None
             
 
+            # Log conversation history BEFORE generation
+            for toc_topic in draft.toc:
+                if toc_topic.topic_id == topic_id:
+                    if subtopic_id:
+                        for toc_subtopic in toc_topic.subtopics:
+                            if toc_subtopic.subtopic_id == subtopic_id:
+                                logger.info(f"BEFORE generation - subtopic {subtopic_id} has {len(toc_subtopic.conversation_history)} conversation entries")
+                                break
+                    else:
+                        logger.info(f"BEFORE generation - topic {topic_id} has {len(toc_topic.conversation_history)} conversation entries")
+                    break
+
             # Generate content using the generation service
             content, source_ids = await self.generation_service.generate_topic_content(
                 draft=draft,
@@ -621,46 +633,84 @@ class DraftService:
                 llm_service=llm_service
             )
 
-            # Save the entire modified draft (includes conversation history and content)
-            success = self.storage.update_draft(draft_id, draft)
-            
-            if success:
-                # Check if we need to generate a summary
-                word_count = len(content.split())
-                summary = ""
-                if word_count > 150:
-                    # Get the topic title for summary generation
-                    toc_item = self.get_toc_item_by_id(draft.model_dump(), topic_id)
-                    
+            # Log conversation history AFTER generation
+            for toc_topic in draft.toc:
+                if toc_topic.topic_id == topic_id:
                     if subtopic_id:
-                        # Find subtopic title
-                        for sub in toc_item.get("subtopics", []):
-                            if sub["id"] == subtopic_id:
-                                title = sub["title"]
+                        for toc_subtopic in toc_topic.subtopics:
+                            if toc_subtopic.subtopic_id == subtopic_id:
+                                logger.info(f"AFTER generation - subtopic {subtopic_id} has {len(toc_subtopic.conversation_history)} conversation entries")
                                 break
                     else:
-                        title = toc_item["title"]
-                    
-                    summary = await self.generation_service.generate_summary(
-                        content=content,
-                        title=title,
-                        llm_service=llm_service
-                    )
+                        logger.info(f"AFTER generation - topic {topic_id} has {len(toc_topic.conversation_history)} conversation entries")
+                    break
 
-                    # Update summary directly in the draft object
-                    for toc_topic in draft.toc:
-                        if toc_topic.topic_id == topic_id:
-                            if subtopic_id:
-                                for toc_subtopic in toc_topic.subtopics:
-                                    if toc_subtopic.subtopic_id == subtopic_id:
-                                        toc_subtopic.summary = summary
-                                        break
-                            else:
-                                toc_topic.summary = summary
+            # Save the generated content to the topic/subtopic
+            for toc_topic in draft.toc:
+                if toc_topic.topic_id == topic_id:
+                    if subtopic_id:
+                        # Save content to subtopic
+                        for toc_subtopic in toc_topic.subtopics:
+                            if toc_subtopic.subtopic_id == subtopic_id:
+                                toc_subtopic.content = content
+                                logger.info(f"Saved content to subtopic {subtopic_id}")
+                                break
+                    else:
+                        # Save content to main topic
+                        toc_topic.content = content
+                        logger.info(f"Saved content to topic {topic_id}")
+                    break
+
+            # Check if we need to generate a summary before saving
+            word_count = len(content.split())
+            summary = ""
+            if word_count > 150:
+                # Get the topic title for summary generation
+                toc_item = self.get_toc_item_by_id(draft.model_dump(), topic_id)
+
+                if subtopic_id:
+                    # Find subtopic title
+                    for sub in toc_item.get("subtopics", []):
+                        if sub["id"] == subtopic_id:
+                            title = sub["title"]
                             break
+                else:
+                    title = toc_item["title"]
 
-                    # Save the draft again with the summary
-                    self.storage.update_draft(draft_id, draft)
+                summary = await self.generation_service.generate_summary(
+                    content=content,
+                    title=title,
+                    llm_service=llm_service
+                )
+
+                # Update summary directly in the draft object
+                for toc_topic in draft.toc:
+                    if toc_topic.topic_id == topic_id:
+                        if subtopic_id:
+                            for toc_subtopic in toc_topic.subtopics:
+                                if toc_subtopic.subtopic_id == subtopic_id:
+                                    toc_subtopic.summary = summary
+                                    break
+                        else:
+                            toc_topic.summary = summary
+                        break
+
+            # Log conversation history state before saving (for debugging)
+            for toc_topic in draft.toc:
+                if toc_topic.topic_id == topic_id:
+                    if subtopic_id:
+                        for toc_subtopic in toc_topic.subtopics:
+                            if toc_subtopic.subtopic_id == subtopic_id:
+                                logger.info(f"Saving subtopic {subtopic_id} with {len(toc_subtopic.conversation_history)} conversation entries")
+                                break
+                    else:
+                        logger.info(f"Saving topic {topic_id} with {len(toc_topic.conversation_history)} conversation entries")
+                    break
+
+            # Save the entire modified draft (includes conversation history, content, and summary)
+            success = self.storage.update_draft(draft_id, draft)
+
+            if success:
                 
                 return {
                     "content": content,

@@ -158,13 +158,29 @@ class DraftStorageService:
             # Ensure draft ID matches
             draft_model.id = draft_id
 
+            # DEBUG: Log conversation history before serialization
+            total_conversations = 0
+            for topic in draft_model.toc:
+                total_conversations += len(topic.conversation_history)
+                for subtopic in topic.subtopics:
+                    total_conversations += len(subtopic.conversation_history)
+            logger.info(f"DEBUG: Before serialization - draft has {total_conversations} total conversation entries")
+
             # Convert the Pydantic model to a dictionary
             draft_dict = draft_model.model_dump(mode='json')
-            
+
+            # DEBUG: Log conversation history after model_dump
+            total_conversations_dict = 0
+            for topic in draft_dict.get('toc', []):
+                total_conversations_dict += len(topic.get('conversation_history', []))
+                for subtopic in topic.get('subtopics', []):
+                    total_conversations_dict += len(subtopic.get('conversation_history', []))
+            logger.info(f"DEBUG: After model_dump - dict has {total_conversations_dict} total conversation entries")
+
             entity = self._serialize_draft(draft_dict)
             self.table_client.upsert_entity(entity=entity)
 
-            
+
             logger.info(f"Updated draft: {draft_id}")
             return True
             
