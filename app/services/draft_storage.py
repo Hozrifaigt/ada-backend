@@ -50,10 +50,15 @@ class DraftStorageService:
         """
         Serialize draft data for Azure Table Storage.
         Azure Table Storage has limitations on property sizes and types.
+        Split large draft_data across multiple properties if needed.
         """
         try:
             draft_id = draft["id"]
-            
+            draft_json = json.dumps(draft, ensure_ascii=False)
+
+            # Check if draft_data exceeds 60KB (leave some buffer)
+            max_size = 60 * 1024  # 60KB buffer
+
             # Create entity with required keys
             entity = {
                 'PartitionKey': 'draft',
@@ -64,15 +69,35 @@ class DraftStorageService:
                 'created_by': draft["metadata"]["created_by"],
                 'created_at': draft["metadata"]["created_at"],
                 'modified_at': draft["metadata"]["modified_at"],
-                
+
                 'client_metadata': json.dumps(draft["metadata"]['client_metadata']),
-                
                 'most_similar_policy_id': draft["metadata"]['most_similar_policy_id'],
-                'draft_data': json.dumps(draft, ensure_ascii=False)
             }
-            
+
+            # Handle large draft data by splitting across multiple properties
+            # Use character-based splitting to avoid UTF-8 issues
+            if len(draft_json) <= (max_size // 2):  # Divide by 2 for UTF-16 safety
+                # Small enough to fit in one property
+                entity['draft_data'] = draft_json
+                entity['draft_chunks'] = 1
+            else:
+                # Split into character-based chunks to avoid UTF-8 corruption
+                chunk_size = max_size // 2  # Safe for UTF-16 encoding
+                chunks = []
+
+                for i in range(0, len(draft_json), chunk_size):
+                    chunk = draft_json[i:i+chunk_size]
+                    chunks.append(chunk)
+
+                # Store chunks as separate properties
+                entity['draft_chunks'] = len(chunks)
+                for i, chunk in enumerate(chunks):
+                    entity[f'draft_data_{i}'] = chunk
+
+                logger.info(f"Split large draft into {len(chunks)} chunks (total chars: {len(draft_json)})")
+
             return entity
-            
+
         except Exception as e:
             logger.error(f"Failed to serialize draft: {e}")
             raise ValueError(f"Draft serialization failed: {str(e)}")
@@ -81,8 +106,27 @@ class DraftStorageService:
     def _deserialize_draft(self, entity: Dict[str, Any]) -> Dict[str, Any]:
         """Deserialize draft data from Azure Table Storage."""
         try:
+            # Check if data is chunked
+            chunk_count = entity.get('draft_chunks', 1)
+
+            if chunk_count == 1:
+                # Single chunk - use draft_data directly
+                draft_json = entity.get('draft_data', '')
+            else:
+                # Multiple chunks - reassemble
+                chunks = []
+                for i in range(chunk_count):
+                    chunk_key = f'draft_data_{i}'
+                    if chunk_key in entity:
+                        chunks.append(entity[chunk_key])
+                    else:
+                        logger.warning(f"Missing chunk {i} for draft")
+
+                draft_json = ''.join(chunks)
+                logger.info(f"Reassembled draft from {chunk_count} chunks")
+
             # Parse the JSON draft data
-            draft = json.loads(entity['draft_data'])
+            draft = json.loads(draft_json)
 
             # Ensure TOC items have required fields (handle legacy data)
             if 'toc' in draft:
