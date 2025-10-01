@@ -70,10 +70,14 @@ async def initialize_draft(
     logger.info(f"Draft initialization requested by user: {current_user.get('email')}")
     
     try:
+        # Extract clean name (split on dash and take first part)
+        raw_name = current_user.get('name', current_user.get('email'))
+        clean_name = raw_name.split('-')[0].strip() if raw_name and '-' in raw_name else raw_name
+
         result = await draft_service.initialize_draft_from_description(
             description=request.description,
             title=request.title,
-            user_id=current_user.get('user_id', current_user.get('email')),
+            user_id=clean_name,
             similarity_service=similarity_service,
             store=store,
             client_metadata=request.client_metadata
@@ -287,7 +291,8 @@ async def generate_topic_content(
                 sources_used=result.get("sources_used", []),
                 summary=result.get("summary", ""),
                 word_count=result.get("word_count", 0),
-                message="Content generated successfully"
+                message="Content generated successfully",
+                is_chat_response=result.get("is_chat_response", False)
             )
         else:
             raise HTTPException(
@@ -322,7 +327,8 @@ async def update_topic_content(
             topic_id,
             request.content,
             request.subtopic_id,
-            llm_service
+            llm_service,
+            request.conversation_history
         )
 
         if success:
@@ -459,4 +465,57 @@ async def export_draft_to_word(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to export draft"
+        )
+
+
+@router.post("/{draft_id}/export/pdf")
+async def export_draft_to_pdf(
+    draft_id: str,
+    request: ExportRequest = ExportRequest(),
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Export draft to PDF document.
+    By default, deletes the draft after export (temporary storage).
+    """
+    logger.info(f"PDF export for draft {draft_id} by user: {current_user.get('email')}")
+
+    try:
+        # Get the draft
+        draft = draft_service.get_draft(draft_id)
+        if not draft:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Draft {draft_id} not found"
+            )
+
+        # Import here to avoid circular imports
+        from app.services.pdf_export_service import PDFExportService
+
+        export_service = PDFExportService()
+        pdf_doc = export_service.export_draft_to_pdf(draft)
+        filename = export_service.get_filename(draft)
+
+        # Delete draft after export if requested
+        if request.delete_after_export:
+            draft_service.delete_draft(draft_id)
+            logger.info(f"Draft {draft_id} deleted after export")
+
+        # Return PDF document
+        return StreamingResponse(
+            pdf_doc,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to export draft to PDF: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export draft to PDF"
         )
