@@ -7,8 +7,9 @@ from datetime import datetime
 
 class ClientMetadata(BaseModel):
     name: str
-    country: str 
-    city: str 
+    country: str
+    city: str
+    industry: str 
 
 
 class InitializeDraftRequest(BaseModel):
@@ -20,7 +21,7 @@ class InitializeDraftRequest(BaseModel):
 
 class UpdateTOCRequest(BaseModel):
     """Request to update/finalize TOC structure."""
-    toc: List[Dict[str, Any]] = Field(..., min_items=1, description="Table of contents structure")
+    toc: List[Dict[str, Any]] = Field(..., description="Table of contents structure")
 
 
 class GenerateContentRequest(BaseModel):
@@ -33,6 +34,7 @@ class UpdateContentRequest(BaseModel):
     """Request to manually update topic/subtopic content."""
     content: str = Field(..., description="Content to update")
     subtopic_id: Optional[str] = Field(None, description="Subtopic ID if updating subtopic")
+    conversation_history: Optional[List['ConversationEntry']] = Field(None, description="Updated conversation history")
 
 
 
@@ -93,6 +95,7 @@ class ContentGenerationResponse(BaseModel):
     summary: str = Field(default="", description="Summary of generated content if > 150 words")
     word_count: int = Field(default=0, description="Word count of generated content")
     message: str
+    is_chat_response: bool = Field(default=False, description="True if this is a chat response, not actual policy content")
 
 
 # ============= Data Models (for internal use) =============

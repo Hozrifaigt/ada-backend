@@ -29,19 +29,26 @@ class ContentGenerationService:
         user_prompt: str,
         vector_store,
         llm_service
-    ) -> Tuple[str, List[str]]:
+    ) -> Tuple[str, List[str], bool]:
         """
         Generate content for a topic or subtopic using RAG and context.
 
         Returns:
-            Tuple of (generated_content, source_ids_used)
+            Tuple of (generated_content, source_ids_used, is_chat_response)
         """
         try:
-            # Step 1: Classify the user query
+            # Step 1: Find the topic in TOC
             toc_item = self._find_toc_item(draft.toc, topic_id)
             if not toc_item:
                 raise ValueError(f"Topic {topic_id} not found in TOC")
 
+            # Step 2: Get conversation history for classification (before classification)
+            classification_history = self._get_conversation_history(
+                draft, topic_id, subtopic_id, limit=3, for_llm_context=False
+            )
+            formatted_classification_history = self._format_conversation_history_for_prompt(classification_history)
+
+            # Step 3: Classify the user query
             # Prepare context for classification
             topic_title = toc_item.topic
             classification_context = {
@@ -50,15 +57,9 @@ class ContentGenerationService:
                 "document_title": draft.metadata.title
             }
 
-            # Get conversation history for classification
-            conversation_history = self._get_conversation_history(
-                draft, topic_id, subtopic_id, limit=3
-            )
-            formatted_history = self._format_conversation_history_for_prompt(conversation_history)
-
-            # Classify the query with conversation context
+            # Classify the query with conversation context (using classification history)
             classification_result = await self.classification_service.classify_query(
-                user_prompt, classification_context, formatted_history
+                user_prompt, classification_context, formatted_classification_history
             )
 
             # Handle non-legitimate queries
@@ -70,23 +71,27 @@ class ContentGenerationService:
                 suggested_response = self.classification_service.get_suggested_response(
                     classification_result.classification
                 )
-                # Return the suggested response instead of generated content
-                return suggested_response, []
+                # Return the suggested response as a chat response, not content
+                return suggested_response, [], True
 
-            # Step 2: Determine what we're generating
+            # Step 4: Determine what we're generating
             if subtopic_id:
                 subtopic_item = self._find_subtopic(toc_item, subtopic_id)
                 if not subtopic_item:
                     raise ValueError(f"Subtopic {subtopic_id} not found")
-                title = subtopic_item.topic
+                topic_title = subtopic_item.topic
                 source_id = subtopic_item.source_subtopic_id
             else:
-                title = toc_item.topic
+                topic_title = toc_item.topic  # Use directly, no need for separate 'title' variable
                 source_id = toc_item.source_topic_id
 
-            # Note: We already have formatted_history from classification step above
+            # Step 5: Get conversation history for generation - last 3 legitimate only
+            generation_history = self._get_conversation_history(
+                draft, topic_id, subtopic_id, limit=3, for_llm_context=True
+            )
+            formatted_generation_history = self._format_conversation_history_for_prompt(generation_history)
 
-            # Step 4: Try to retrieve existing content if source_id exists
+            # Step 6: Try to retrieve existing content if source_id exists
             if source_id:
                 existing_content = await self._retrieve_existing_content(source_id, vector_store)
                 if existing_content:
@@ -96,7 +101,7 @@ class ContentGenerationService:
                         draft=draft,
                         topic_id=topic_id,
                         subtopic_id=subtopic_id,
-                        conversation_history=formatted_history,
+                        conversation_history=formatted_generation_history,
                         llm_service=llm_service
                     )
 
@@ -106,44 +111,49 @@ class ContentGenerationService:
                         draft, topic_id, user_prompt, adapted_content, subtopic_id
                     )
 
-                    return adapted_content, [source_id]
+                    return adapted_content, [source_id], False
 
-            # Step 5: Search for similar topics (for custom topics)
-            similar_topics = await self._search_similar_topics(title, vector_store, threshold=0.7)
+            # Step 7: Search for similar topics (for custom topics without source_id)
+            similar_topics = await self._search_similar_topics(topic_title, vector_store, threshold=0.7)
 
-            # Step 6: Build complete context
+            # Step 8: Build complete context
             sequential_context = self._build_sequential_context(
                 draft,
                 topic_id,
                 subtopic_id
             )
 
-            # Step 7: Generate content based on what we found
+            # Format the full TOC for LLM context
+            full_toc = self._format_full_toc(draft.toc)
+
+            # Step 9: Generate content based on what we found
             if similar_topics:
                 # Generate with similar topics as reference
                 content = await self._generate_with_references(
-                    title=title,
+                    title=topic_title,
                     user_prompt=user_prompt,
                     similar_topics=similar_topics,
                     sequential_context=sequential_context,
                     draft_metadata=draft.metadata,
-                    conversation_history=formatted_history,
-                    llm_service=llm_service
+                    conversation_history=formatted_generation_history,
+                    llm_service=llm_service,
+                    full_toc=full_toc
                 )
                 source_ids = [topic.get("id", topic.get("topic_id", "unknown")) for topic in similar_topics[:3]]
             else:
                 # Generate from scratch
                 content = await self._generate_from_scratch(
-                    title=title,
+                    title=topic_title,
                     user_prompt=user_prompt,
                     sequential_context=sequential_context,
                     draft_metadata=draft.metadata,
-                    conversation_history=formatted_history,
-                    llm_service=llm_service
+                    conversation_history=formatted_generation_history,
+                    llm_service=llm_service,
+                    full_toc=full_toc
                 )
                 source_ids = []
 
-            # Step 8: Add conversation to draft history
+            # Step 10: Add conversation to draft history
             logger.info(f"DEBUG: About to add conversation for topic {topic_id}, subtopic {subtopic_id}")
             self._add_conversation_to_draft(
                 draft, topic_id, user_prompt, content, subtopic_id
@@ -159,7 +169,7 @@ class ContentGenerationService:
                 else:
                     logger.info(f"DEBUG: After adding conversation - topic {topic_id} now has {len(topic.conversation_history)} entries")
 
-            return content, source_ids
+            return content, source_ids, False
 
         except Exception as e:
             import traceback
@@ -233,11 +243,16 @@ class ContentGenerationService:
             draft, topic_id, subtopic_id
         )
 
+        # Format the full TOC for context
+        full_toc = self._format_full_toc(draft.toc)
+
         # Use prompt manager
         prompt = self.prompt_manager.get_prompt(
             "adapt_existing_content",
             document_title=draft.metadata.title,
             document_description=draft.metadata.description,
+            industry=draft.metadata.client_metadata.industry,
+            full_table_of_contents=full_toc,
             previous_topics=self._format_context_for_prompt(sequential_context),
             existing_content=existing_content,
             user_requirements=user_prompt,
@@ -256,7 +271,8 @@ class ContentGenerationService:
         sequential_context: Dict[str, Any],
         draft_metadata: DraftMetadata,
         conversation_history: str,
-        llm_service
+        llm_service,
+        full_toc: str
     ) -> str:
         """Generate content using similar topics as reference."""
 
@@ -271,6 +287,8 @@ class ContentGenerationService:
             "generate_with_references",
             document_title=draft_metadata.title,
             document_description=draft_metadata.description,
+            industry=draft_metadata.client_metadata.industry,
+            full_table_of_contents=full_toc,
             topic_title=title,
             user_requirements=user_prompt,
             previous_topics=self._format_context_for_prompt(sequential_context),
@@ -289,7 +307,8 @@ class ContentGenerationService:
         sequential_context: Dict[str, Any],
         draft_metadata: DraftMetadata,
         conversation_history: str,
-        llm_service
+        llm_service,
+        full_toc: str
     ) -> str:
         """Generate content from scratch when no references are available."""
 
@@ -297,6 +316,8 @@ class ContentGenerationService:
             "generate_from_scratch",
             document_title=draft_metadata.title,
             document_description=draft_metadata.description,
+            industry=draft_metadata.client_metadata.industry,
+            full_table_of_contents=full_toc,
             topic_title=title,
             user_requirements=user_prompt,
             previous_topics=self._format_context_for_prompt(sequential_context),
@@ -400,6 +421,59 @@ class ContentGenerationService:
 
         return "\n\n".join(formatted)
 
+    def _format_full_toc(self, toc: List) -> str:
+        """Format the full table of contents with summaries for LLM context."""
+        if not toc:
+            return "No table of contents available."
+
+        formatted = []
+        for topic in toc:
+            # Add main topic with summary if available
+            topic_line = f"{topic.order}. {topic.topic}"
+
+            # Add status indicator and summary
+            if topic.content:
+                if topic.summary:
+                    topic_line += f" [COMPLETED - Summary: {topic.summary}]"
+                else:
+                    # If content exists but no summary (content < 150 words), show brief content
+                    word_count = len(topic.content.split())
+                    if word_count <= 50:
+                        topic_line += f" [COMPLETED - Content: {topic.content}]"
+                    else:
+                        # Take first 50 words as brief summary
+                        brief = " ".join(topic.content.split()[:50]) + "..."
+                        topic_line += f" [COMPLETED - Brief: {brief}]"
+            else:
+                topic_line += " [PENDING]"
+
+            formatted.append(topic_line)
+
+            # Add subtopics with summaries if they exist
+            if topic.subtopics:
+                for subtopic in topic.subtopics:
+                    subtopic_line = f"   {topic.order}.{subtopic.order} {subtopic.topic}"
+
+                    # Add status indicator and summary
+                    if subtopic.content:
+                        if subtopic.summary:
+                            subtopic_line += f" [COMPLETED - Summary: {subtopic.summary}]"
+                        else:
+                            # If content exists but no summary (content < 150 words)
+                            word_count = len(subtopic.content.split())
+                            if word_count <= 50:
+                                subtopic_line += f" [COMPLETED - Content: {subtopic.content}]"
+                            else:
+                                # Take first 50 words as brief summary
+                                brief = " ".join(subtopic.content.split()[:50]) + "..."
+                                subtopic_line += f" [COMPLETED - Brief: {brief}]"
+                    else:
+                        subtopic_line += " [PENDING]"
+
+                    formatted.append(subtopic_line)
+
+        return "\n".join(formatted)
+
     def _find_toc_item(
         self,
         toc: List,
@@ -428,9 +502,18 @@ class ContentGenerationService:
         draft,
         topic_id: str,
         subtopic_id: Optional[str] = None,
-        limit: int = 5
+        limit: int = 3,
+        for_llm_context: bool = False
     ) -> List[Dict[str, Any]]:
-        """Get conversation history for a topic or subtopic."""
+        """Get conversation history for a topic or subtopic.
+
+        Args:
+            draft: The draft object
+            topic_id: Topic ID
+            subtopic_id: Optional subtopic ID
+            limit: Maximum number of entries to return
+            for_llm_context: If True, filter to only legitimate content responses
+        """
         try:
             # Find topic in TOC
             topic = self._find_toc_item(draft.toc, topic_id)
@@ -451,8 +534,42 @@ class ContentGenerationService:
                 else:
                     return []
 
-            # Sort by timestamp (newest first) and limit to last N messages
+            # Sort by timestamp (newest first)
             sorted_history = sorted(history, key=lambda x: x['timestamp'], reverse=True)
+
+            if for_llm_context:
+                # Filter to get only legitimate conversations for LLM
+                # (ones that resulted in actual content, not chat responses)
+                chat_response_indicators = [
+                    "I'm here to help with policy",
+                    "I can't help with that request",
+                    "Let's focus on creating",
+                    "How can I assist you with creating",
+                    "I need more specific information",
+                    "Let's focus on policy content",
+                    "I can't assist with that"
+                ]
+
+                legitimate_history = []
+                for entry in sorted_history:
+                    ai_response = entry.get('ai_response', '')
+                    # Check if it's a meaningful content response
+                    # Check first 200 chars for efficiency
+                    is_chat_response = any(
+                        indicator in ai_response[:200]
+                        for indicator in chat_response_indicators
+                    )
+
+                    if not is_chat_response and ai_response.strip() and len(ai_response) > 100:
+                        # This is legitimate content (not a short chat response)
+                        legitimate_history.append(entry)
+                        if len(legitimate_history) >= limit:
+                            break
+
+                logger.info(f"Filtered history: {len(legitimate_history)} legitimate out of {len(sorted_history)} total")
+                return legitimate_history
+
+            # For non-LLM context, return all recent entries
             return sorted_history[:limit]
 
         except Exception as e:

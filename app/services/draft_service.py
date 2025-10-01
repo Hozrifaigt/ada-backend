@@ -253,17 +253,32 @@ class DraftService:
 
             toc_topics = []
             for toc_item in formatted_toc:
+                # Find existing topic to preserve content and conversation history
+                existing_topic = None
+                for existing in draft_model.toc:
+                    if existing.topic_id == toc_item['topic_id']:
+                        existing_topic = existing
+                        break
+
                 # Convert subtopics
                 subtopics = []
                 for sub_item in toc_item.get('subtopics', []):
+                    # Find existing subtopic to preserve content and conversation history
+                    existing_subtopic = None
+                    if existing_topic:
+                        for existing_sub in existing_topic.subtopics:
+                            if existing_sub.subtopic_id == sub_item['id']:
+                                existing_subtopic = existing_sub
+                                break
+
                     subtopic = TOCSubtopic(
                         subtopic_id=sub_item['id'],
                         topic=sub_item['title'],
                         order=sub_item['order'],
                         source_subtopic_id=sub_item.get('source_subtopic_id'),
-                        content="",
-                        summary="",
-                        conversation_history=[]
+                        content=existing_subtopic.content if existing_subtopic else "",
+                        summary=existing_subtopic.summary if existing_subtopic else "",
+                        conversation_history=existing_subtopic.conversation_history if existing_subtopic else []
                     )
                     subtopics.append(subtopic)
 
@@ -273,9 +288,9 @@ class DraftService:
                     topic=toc_item['title'],
                     order=toc_item['order'],
                     source_topic_id=toc_item.get('source_topic_id'),
-                    content="",
-                    summary="",
-                    conversation_history=[],
+                    content=existing_topic.content if existing_topic else "",
+                    summary=existing_topic.summary if existing_topic else "",
+                    conversation_history=existing_topic.conversation_history if existing_topic else [],
                     subtopics=subtopics
                 )
                 toc_topics.append(topic)
@@ -322,7 +337,8 @@ class DraftService:
         topic_id: str,
         content: str,
         subtopic_id: Optional[str] = None,
-        llm_service = None
+        llm_service = None,
+        conversation_history: Optional[List] = None
     ) -> bool:
         """
         Update content for a topic or subtopic using typed models.
@@ -346,6 +362,10 @@ class DraftService:
                         for toc_subtopic in toc_topic.subtopics:
                             if toc_subtopic.subtopic_id == subtopic_id:
                                 toc_subtopic.content = content
+                                # Update conversation history if provided
+                                if conversation_history is not None:
+                                    toc_subtopic.conversation_history = conversation_history
+                                    logger.info(f"Updated subtopic {subtopic_id} conversation history with {len(conversation_history)} entries")
                                 # Generate LLM summary if content > 150 words and LLM service available
                                 if llm_service:
                                     toc_subtopic.summary = await self.generation_service.generate_summary(
@@ -365,6 +385,10 @@ class DraftService:
                     else:
                         # Update main topic content
                         toc_topic.content = content
+                        # Update conversation history if provided
+                        if conversation_history is not None:
+                            toc_topic.conversation_history = conversation_history
+                            logger.info(f"Updated topic {topic_id} conversation history with {len(conversation_history)} entries")
                         # Generate LLM summary if content > 150 words and LLM service available
                         if llm_service:
                             toc_topic.summary = await self.generation_service.generate_summary(
@@ -624,7 +648,7 @@ class DraftService:
                     break
 
             # Generate content using the generation service
-            content, source_ids = await self.generation_service.generate_topic_content(
+            content, source_ids, is_chat_response = await self.generation_service.generate_topic_content(
                 draft=draft,
                 topic_id=topic_id,
                 subtopic_id=subtopic_id,
@@ -645,26 +669,13 @@ class DraftService:
                         logger.info(f"AFTER generation - topic {topic_id} has {len(toc_topic.conversation_history)} conversation entries")
                     break
 
-            # Save the generated content to the topic/subtopic
-            for toc_topic in draft.toc:
-                if toc_topic.topic_id == topic_id:
-                    if subtopic_id:
-                        # Save content to subtopic
-                        for toc_subtopic in toc_topic.subtopics:
-                            if toc_subtopic.subtopic_id == subtopic_id:
-                                toc_subtopic.content = content
-                                logger.info(f"Saved content to subtopic {subtopic_id}")
-                                break
-                    else:
-                        # Save content to main topic
-                        toc_topic.content = content
-                        logger.info(f"Saved content to topic {topic_id}")
-                    break
+            # Don't save content automatically - let the frontend handle saving
+            # The conversation history is already updated by the generation service
 
-            # Check if we need to generate a summary before saving
+            # Generate summary for response but don't save it
             word_count = len(content.split())
             summary = ""
-            if word_count > 150:
+            if word_count > 150 and not is_chat_response:
                 # Get the topic title for summary generation
                 toc_item = self.get_toc_item_by_id(draft.model_dump(), topic_id)
 
@@ -682,18 +693,7 @@ class DraftService:
                     title=title,
                     llm_service=llm_service
                 )
-
-                # Update summary directly in the draft object
-                for toc_topic in draft.toc:
-                    if toc_topic.topic_id == topic_id:
-                        if subtopic_id:
-                            for toc_subtopic in toc_topic.subtopics:
-                                if toc_subtopic.subtopic_id == subtopic_id:
-                                    toc_subtopic.summary = summary
-                                    break
-                        else:
-                            toc_topic.summary = summary
-                        break
+                # Don't save the summary - let the frontend handle it when saving content
 
             # Log conversation history state before saving (for debugging)
             for toc_topic in draft.toc:
@@ -707,7 +707,7 @@ class DraftService:
                         logger.info(f"Saving topic {topic_id} with {len(toc_topic.conversation_history)} conversation entries")
                     break
 
-            # Save the entire modified draft (includes conversation history, content, and summary)
+            # Save the modified draft (only conversation history is updated)
             success = self.storage.update_draft(draft_id, draft)
 
             if success:
@@ -716,7 +716,8 @@ class DraftService:
                     "content": content,
                     "sources_used": source_ids,
                     "summary": summary,
-                    "word_count": word_count
+                    "word_count": word_count,
+                    "is_chat_response": is_chat_response
                 }
             else:
                 logger.error(f"Failed to save generated content for topic {topic_id}")

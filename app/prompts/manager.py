@@ -31,6 +31,11 @@ class PromptManager:
         if not template:
             raise ValueError(f"Prompt '{name}' in {self.filepath.name} is missing a 'template' key.")
 
+        # Provide default empty string for missing optional parameters
+        # This helps with backward compatibility when new parameters are added
+        if 'full_table_of_contents' not in kwargs:
+            kwargs['full_table_of_contents'] = ''
+
         # Format the template string with the provided variables
         try:
             return template.format(**kwargs)

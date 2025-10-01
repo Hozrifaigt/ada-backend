@@ -69,6 +69,11 @@ adapt_existing_content:
     DOCUMENT CONTEXT:
     Title: {document_title}
     Description: {document_description}
+    Industry: {industry}
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
 
     PREVIOUS TOPICS SUMMARY:
     {previous_topics}
@@ -85,10 +90,12 @@ adapt_existing_content:
     INSTRUCTIONS:
     1. Adapt the existing content to meet the user's specific requirements
     2. Maintain consistency with previous topics and conversation history
-    3. Do not repeat information already covered
-    4. Keep the professional tone and structure
+    3. Review the summaries in the TOC to avoid duplicating content already covered
+    4. Keep the professional tone and structure appropriate for the {industry} industry
     5. Ensure the content flows naturally from previous topics
     6. Consider the context from previous conversations
+    7. Build upon concepts introduced in completed topics without repeating them
+    8. Include industry-specific regulations and standards relevant to {industry}
 
     ADAPTED CONTENT:
 
@@ -100,6 +107,11 @@ generate_with_references:
     DOCUMENT CONTEXT:
     Title: {document_title}
     Description: {document_description}
+    Industry: {industry}
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
 
     TOPIC TO CREATE:
     {topic_title}
@@ -120,45 +132,12 @@ generate_with_references:
     1. Create comprehensive content for "{topic_title}" based on the user requirements
     2. Use the similar topics as reference but adapt to the specific context
     3. Do not copy content verbatim - create original content
-    4. Ensure no repetition of information from previous topics
-    5. Maintain professional policy language and structure
-    6. Include specific details relevant to the organization's context
+    4. Review the summaries in the TOC to avoid duplicating content already covered
+    5. Maintain professional policy language appropriate for the {industry} industry
+    6. Include specific details relevant to the organization's context and industry
     7. Consider the context from previous conversations
-
-    CONTENT:
-
-
-generate_with_references:
-  template: |
-    You are creating a policy topic with reference to similar existing policies.
-
-    DOCUMENT CONTEXT:
-    Title: {document_title}
-    Description: {document_description}
-
-    TOPIC TO CREATE:
-    {topic_title}
-
-    USER REQUIREMENTS:
-    {user_requirements}
-
-    PREVIOUS TOPICS SUMMARY:
-    {previous_topics}
-
-    SIMILAR TOPICS FROM KNOWLEDGE BASE:
-    {similar_topics}
-
-    CONVERSATION HISTORY:
-    {conversation_history}
-
-    INSTRUCTIONS:
-    1. Create comprehensive content for "{topic_title}" based on the user requirements
-    2. Use the similar topics as reference but adapt to the specific context
-    3. Do not copy content verbatim - create original content
-    4. Ensure no repetition of information from previous topics
-    5. Maintain professional policy language and structure
-    6. Include specific details relevant to the organization's context
-    7. Consider the context from previous conversations
+    8. Reference or build upon completed topics when relevant without repeating their content
+    9. Consider industry-specific regulations, standards, and best practices for {industry}
 
     CONTENT:
 
@@ -170,6 +149,11 @@ generate_from_scratch:
     DOCUMENT CONTEXT:
     Title: {document_title}
     Description: {document_description}
+    Industry: {industry}
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
 
     TOPIC TO CREATE:
     {topic_title}
@@ -185,12 +169,14 @@ generate_from_scratch:
 
     INSTRUCTIONS:
     1. Create comprehensive content for "{topic_title}" based on the user requirements
-    2. Since no existing references are available, use best practices and industry standards
-    3. Ensure consistency with previous topics
-    4. Do not repeat information already covered
-    5. Maintain professional policy language and structure
-    6. Include specific actionable guidelines
+    2. Since no existing references are available, use best practices and standards for the {industry} industry
+    3. Review the summaries in the TOC to ensure consistency with completed topics
+    4. Do not repeat information already covered - reference it if needed
+    5. Maintain professional policy language appropriate for {industry}
+    6. Include specific actionable guidelines relevant to the industry
     7. Consider the context from previous conversations
+    8. Build a cohesive policy by connecting to previously established concepts
+    9. Apply industry-specific requirements and compliance needs for {industry}
 
     CONTENT:
 

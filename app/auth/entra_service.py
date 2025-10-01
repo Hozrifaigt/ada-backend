@@ -17,23 +17,23 @@ class EntraIDService:
     Azure Entra ID authentication service using MSAL.
     Handles token validation, user info retrieval, and SSO integration.
     """
-    
+
     def __init__(self):
         # Azure AD endpoints
         self.authority = f"https://login.microsoftonline.com/{settings.AZURE_TENANT_ID}"
         self.jwks_uri = f"https://login.microsoftonline.com/{settings.AZURE_TENANT_ID}/discovery/v2.0/keys"
-        
+
         # MSAL confidential client for server-to-server calls
         self.msal_app = msal.ConfidentialClientApplication(
             client_id=settings.AZURE_CLIENT_ID,
             client_credential=settings.AZURE_CLIENT_SECRET,
             authority=self.authority
         )
-        
+
         # Cache for JWKS keys (Azure's public keys for token verification)
         self._jwks_cache = None
         self._jwks_cache_expiry = None
-        
+
         logger.info("EntraIDService initialized successfully")
     
     async def get_jwks_keys(self) -> Dict[str, Any]:
@@ -148,7 +148,7 @@ class EntraIDService:
     
     async def get_user_info(self, token_claims: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Extract user information from validated token claims.
+        Extract user information from validated Azure AD token claims.
         """
         return {
             "user_id": token_claims.get("oid"),
@@ -160,20 +160,18 @@ class EntraIDService:
     async def validate_user_permissions(self, user_info: Dict[str, Any]) -> bool:
         """
         Validate if the user has permission to access the application.
-        Customize this method based on your requirements.
+        Only allows users from GT's tenant and allowed domains.
         """
-        # Check if user belongs to Grant Thornton tenant
-
         logger.info(f"Validating permissions for user: {user_info}")
 
+        # Check if user belongs to the correct tenant (GT)
         if user_info.get("tenant_id") != settings.AZURE_TENANT_ID:
             logger.warning(f"User from wrong tenant: {user_info.get('tenant_id')}")
             return False
-        
-        # Check if user email domain is allowed
-        email = user_info.get("email", "")
 
-        allowed_domains = [domain.strip() for domain in settings.ALLOWED_EMAIL_DOMAINS.split(',')]        
+        # Check if user email domain is allowed (GT's domains)
+        email = user_info.get("email", "")
+        allowed_domains = [domain.strip() for domain in settings.ALLOWED_EMAIL_DOMAINS.split(',')]
         if not any(email.lower().endswith(f"@{domain}") for domain in allowed_domains):
             logger.warning(f"User email not from allowed domain: {email}")
             return False
