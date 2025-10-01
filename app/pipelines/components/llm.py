@@ -1,8 +1,10 @@
 import logging
 import asyncio
+import time
 
 from langchain_openai import AzureChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from openai import APIConnectionError, APITimeoutError
 
 from app.config.settings import settings
 from app.prompts.manager import PromptManager 
@@ -18,6 +20,8 @@ class AzureLLM:
             azure_deployment=settings.AZURE_OPENAI_CHAT_DEPLOYMENT,
             azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
             api_key=settings.AZURE_OPENAI_KEY,
+            # request_timeout=120,  # 2 minutes timeout
+            # max_retries=5,  # Increase retry attempts
         )
         
         self.prompt_manager = prompt_manager
@@ -33,19 +37,32 @@ class AzureLLM:
         logger.info("Production AzureLLM initialized with custom prompts")
 
     async def generate(self, prompt: str) -> str:
-        """Generate content based on a text prompt."""
-        try:
-            # Create a simple user message from the prompt
-            messages = [{"role": "user", "content": prompt}]
-            result = await self.client.ainvoke(messages)
+        """Generate content based on a text prompt with retry logic."""
+        max_retries = 3
+        base_delay = 2
 
-            generated_content = result.content.strip() if result.content else "No content generated"
-            logger.debug(f"Generated content: {len(generated_content)} characters")
-            return generated_content
+        for attempt in range(max_retries + 1):
+            try:
+                # Create a simple user message from the prompt
+                messages = [{"role": "user", "content": prompt}]
+                result = await self.client.ainvoke(messages)
 
-        except Exception as e:
-            logger.error(f"Content generation failed: {e}")
-            raise
+                generated_content = result.content.strip() if result.content else "No content generated"
+                logger.debug(f"Generated content: {len(generated_content)} characters")
+                return generated_content
+
+            except (APIConnectionError, APITimeoutError) as e:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Connection/timeout error (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay} seconds...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Content generation failed after {max_retries + 1} attempts: {e}")
+                    raise
+            except Exception as e:
+                logger.error(f"Content generation failed: {e}")
+                raise
 
     async def asummarize_document(self, text: str) -> str:
         """Generate document summary using custom prompt with recursive chunking."""
