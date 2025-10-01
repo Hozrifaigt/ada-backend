@@ -1,10 +1,8 @@
 **/__pycache__/
 *.pyc
 
-/app/data/
 data/
 /env/*
-/knowledge_hub/*
 
-CLAUDE.md
-app/services/word_export_service.py
+.claude/
+.vscode/
