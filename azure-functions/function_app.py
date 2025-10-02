@@ -2,55 +2,74 @@ import azure.functions as func
 import json
 import os
 import sys
+import logging
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-@app.route(route="hello")
-def hello(req: func.HttpRequest) -> func.HttpResponse:
-    """Simple test endpoint"""
-    return func.HttpResponse(
-        json.dumps({
-            "message": "Hello from Azure Functions",
-            "python_version": sys.version,
-            "working_dir": os.getcwd()
-        }),
-        status_code=200,
-        mimetype="application/json"
-    )
-
-@app.route(route="env-check")
-def env_check(req: func.HttpRequest) -> func.HttpResponse:
-    """Check environment variables"""
-    return func.HttpResponse(
-        json.dumps({
-            "AZURE_OPENAI_ENDPOINT": os.getenv("AZURE_OPENAI_ENDPOINT", "NOT_SET"),
-            "AZURE_SEARCH_ENDPOINT": os.getenv("AZURE_SEARCH_ENDPOINT", "NOT_SET"),
-            "PROMPT_MANAGER_PATH": os.getenv("PROMPT_MANAGER_PATH", "NOT_SET"),
-        }),
-        status_code=200,
-        mimetype="application/json"
-    )
-
-# Try to load FastAPI
+# Try to load FastAPI and use it as the main app
 try:
     from app.main import app as fastapi_app
+    logger.info("Successfully imported FastAPI app")
 
-    # Add FastAPI wrapper
-    asgi_app = func.AsgiFunctionApp(app=fastapi_app, http_auth_level=func.AuthLevel.ANONYMOUS)
+    # Use AsgiFunctionApp for FastAPI - this should handle all routes
+    app = func.AsgiFunctionApp(app=fastapi_app, http_auth_level=func.AuthLevel.ANONYMOUS)
+    logger.info("Created AsgiFunctionApp successfully")
 
-    # Merge the apps - this is the key!
-    for function_name in asgi_app.get_functions():
-        app.register_functions(asgi_app.get_functions())
+    # Add a test function to verify it's working
+    @app.function_name(name="AzureTest")
+    @app.route(route="azure-test")
+    def azure_test(req: func.HttpRequest) -> func.HttpResponse:
+        return func.HttpResponse(
+            json.dumps({
+                "message": "Azure Functions with FastAPI is working",
+                "fastapi_loaded": True
+            }),
+            status_code=200,
+            mimetype="application/json"
+        )
 
 except Exception as e:
-    # Add error endpoint if FastAPI fails
+    logger.error(f"Failed to load FastAPI: {str(e)}")
+
+    # Fallback to basic function app
+    app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+    @app.route(route="hello")
+    def hello(req: func.HttpRequest) -> func.HttpResponse:
+        """Simple test endpoint"""
+        return func.HttpResponse(
+            json.dumps({
+                "message": "Hello from Azure Functions (FastAPI failed)",
+                "python_version": sys.version,
+                "working_dir": os.getcwd()
+            }),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    @app.route(route="env-check")
+    def env_check(req: func.HttpRequest) -> func.HttpResponse:
+        """Check environment variables"""
+        return func.HttpResponse(
+            json.dumps({
+                "AZURE_OPENAI_ENDPOINT": os.getenv("AZURE_OPENAI_ENDPOINT", "NOT_SET"),
+                "AZURE_SEARCH_ENDPOINT": os.getenv("AZURE_SEARCH_ENDPOINT", "NOT_SET"),
+                "PROMPT_MANAGER_PATH": os.getenv("PROMPT_MANAGER_PATH", "NOT_SET"),
+                "DATA_PATH": os.getenv("DATA_PATH", "NOT_SET"),
+            }),
+            status_code=200,
+            mimetype="application/json"
+        )
+
     @app.route(route="fastapi-error")
     def fastapi_error(req: func.HttpRequest) -> func.HttpResponse:
+        # Keep it simple to avoid secondary errors
         return func.HttpResponse(
             json.dumps({
                 "error": "FastAPI failed to load",
                 "type": type(e).__name__,
-                "message": str(e)
+                "message": str(e)[:500]  # Limit message length
             }),
             status_code=200,
             mimetype="application/json"
