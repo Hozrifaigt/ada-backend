@@ -1,0 +1,5 @@
+# Azure Functions specific dependency
+azure-functions
+
+# Include all dependencies from the main backend application
+-r ../requirements.txt
