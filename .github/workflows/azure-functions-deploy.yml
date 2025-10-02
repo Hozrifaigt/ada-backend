@@ -3,24 +3,13 @@ name: Deploy to Azure Function App
 on:
   push:
     branches:
-      - main      # Triggers production deployment
-      - develop   # Triggers dev deployment
+      - dev   # Triggers dev deployment
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to deploy to'
-        required: true
-        default: 'dev'
-        type: choice
-        options:
-          - dev
-          - prod
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || github.event.inputs.environment }}
+    environment: dev
 
     steps:
       - name: Checkout code
@@ -37,8 +26,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
-      - name: Deploy to Azure Function App (Dev)
-        if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'dev'
+      - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_DEV }}
@@ -47,20 +35,6 @@ jobs:
           scm-do-build-during-deployment: true
           enable-oryx-build: true
 
-      - name: Deploy to Azure Function App (Prod)
-        if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'prod'
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_PROD }}
-          package: './azure-functions'
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PROD }}
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
-
       - name: Deployment Summary
         run: |
-          if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.event.inputs.environment }}" == "prod" ]; then
-            echo "✅ Deployed to PRODUCTION: ${{ secrets.AZURE_FUNCTIONAPP_NAME_PROD }}"
-          else
-            echo "✅ Deployed to DEV: ${{ secrets.AZURE_FUNCTIONAPP_NAME_DEV }}"
-          fi
+          echo "✅ Deployed to DEV: ${{ secrets.AZURE_FUNCTIONAPP_NAME_DEV }}"
