@@ -16,19 +16,6 @@ try:
     app = func.AsgiFunctionApp(app=fastapi_app, http_auth_level=func.AuthLevel.ANONYMOUS)
     logger.info("Created AsgiFunctionApp successfully")
 
-    # Add a test function to verify it's working
-    @app.function_name(name="AzureTest")
-    @app.route(route="azure-test")
-    def azure_test(req: func.HttpRequest) -> func.HttpResponse:
-        return func.HttpResponse(
-            json.dumps({
-                "message": "Azure Functions with FastAPI is working",
-                "fastapi_loaded": True
-            }),
-            status_code=200,
-            mimetype="application/json"
-        )
-
 except Exception as e:
     logger.error(f"Failed to load FastAPI: {str(e)}")
 
