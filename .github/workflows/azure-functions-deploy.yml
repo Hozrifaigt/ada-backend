@@ -25,14 +25,10 @@ jobs:
           # Copy the app folder into azure-functions directory
           cp -r app azure-functions/
 
-          # Copy any other needed files
-          cp requirements.txt azure-functions/
-
           # Navigate to azure-functions and install dependencies
           cd azure-functions
           python -m pip install --upgrade pip
           pip install -r requirements.txt --target=".python_packages/lib/site-packages"
-          pip install azure-functions --target=".python_packages/lib/site-packages"
 
       - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
