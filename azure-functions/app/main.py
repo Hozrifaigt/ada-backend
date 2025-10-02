@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import user, processing, admin, auth, drafts
+from app.api import user, processing, admin, auth, drafts, debug
 from app.api.policy import router as policy_router
 from app.config.logging_config import setup_logging
 
@@ -89,6 +89,7 @@ app.include_router(drafts.router, prefix="/api/v1", tags=["Draft Management"])
 app.include_router(user.router, prefix="/api/v1", tags=["User Management"])
 app.include_router(processing.router, prefix="/api/v1", tags=["Pipeline Trigger"])
 app.include_router(admin.router, prefix="/api/v1", tags=["Administration"])
+app.include_router(debug.router, prefix="/api/v1", tags=["Debug"])
 
 
 @app.get("/healthcheck", tags=["Monitoring"])
