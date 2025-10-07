@@ -2,12 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /code
 
-COPY requirements.txt requirements.txt
+# Copy requirements from azure-functions directory
+COPY azure-functions/requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
-COPY ./app /code/app
+# Copy the app from azure-functions directory
+COPY azure-functions/app /code/app
 
-# Expose port 5678 for debugging
-EXPOSE 5678
+# Expose ports for API and debugging
+EXPOSE 8000 5678
 
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -225,3 +225,44 @@ classify_query:
     CONFIDENCE: [0.0-1.0]
     REASON: [brief explanation]
     SHOULD_PROCEED: [true/false]
+
+
+generate_toc_from_description:
+  template: |
+    You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
+
+    POLICY CONTEXT:
+    - Title: {title}
+    - Description: {description}
+    - Industry: {industry}
+    - Company: {company_name}
+    - Location: {city}, {country}
+
+    TASK:
+    Generate a well-structured Table of Contents for this policy document. The TOC should:
+    1. Be specific to the {industry} industry
+    2. Address the requirements mentioned in the description
+    3. Follow best practices for {country} regulations and standards
+    4. Include {max_topics} main topics maximum
+    5. Include up to {max_subtopics} subtopics per main topic
+
+    Consider:
+    - Industry-specific compliance requirements
+    - Local regulations in {country}
+    - Common organizational needs in {industry}
+    - The specific focus areas mentioned in the description
+
+    IMPORTANT: Return the TOC as a JSON array with the following structure:
+    [
+      {{
+        "topic": "Main Topic Title",
+        "subtopics": [
+          {{"topic": "Subtopic 1 Title"}},
+          {{"topic": "Subtopic 2 Title"}}
+        ]
+      }}
+    ]
+
+    Return ONLY the JSON array, no additional text or explanation.
+
+    JSON TOC:

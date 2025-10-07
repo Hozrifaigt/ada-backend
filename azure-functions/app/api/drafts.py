@@ -80,7 +80,8 @@ async def initialize_draft(
             user_id=clean_name,
             similarity_service=similarity_service,
             store=store,
-            client_metadata=request.client_metadata
+            client_metadata=request.client_metadata,
+            llm_service=get_llm()  # Pass LLM service for TOC generation
         )
         
         if result:
@@ -88,7 +89,8 @@ async def initialize_draft(
                 draft_id=result["draft_id"],
                 similar_policies_found=result["similar_policies_found"],
                 suggested_toc=result["draft"]["toc"],
-                message="Draft initialized successfully"
+                message="Draft initialized successfully",
+                toc_source=result.get("toc_source", "similarity_search")
             )
         else:
             raise HTTPException(

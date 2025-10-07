@@ -53,6 +53,7 @@ class InitializeDraftResponse(BaseModel):
     similar_policies_found: int
     suggested_toc: List[Dict[str, Any]]
     message: str
+    toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
 
 
 class DraftSummary(BaseModel):

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api import user, processing, admin, auth, drafts, debug
 from app.api.policy import router as policy_router
 from app.config.logging_config import setup_logging
+from app.config.settings import settings
 
 if os.environ.get('DEBUG_MODE') == 'true':
     import debugpy
@@ -33,13 +34,13 @@ app = FastAPI(
 )
 
 # Configure CORS - support both local development and Azure deployment
-allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").split(",") if os.environ.get("ALLOWED_ORIGINS") else ["*"]
+allowed_origins = settings.ALLOWED_ORIGINS.split(",") if "," in settings.ALLOWED_ORIGINS else [settings.ALLOWED_ORIGINS]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

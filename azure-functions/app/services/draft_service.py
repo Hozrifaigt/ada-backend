@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from app.models.policy_models import SimilarPolicyRequest, PolicyMatch
 from app.models.draft_models import ClientMetadata, DraftMetadata, CompleteDraft
 from app.services.generation_service import ContentGenerationService
+from app.services.toc_generation_service import TOCGenerationService
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +27,12 @@ class DraftService:
         user_id: str,
         similarity_service,
         store,
-        client_metadata: ClientMetadata
+        client_metadata: ClientMetadata,
+        llm_service=None
     ) -> Dict[str, Any]:
         """
         Initialize a new draft from user description.
-        Returns draft with suggested TOC from similar policies.
+        Returns draft with suggested TOC from similar policies or AI-generated TOC.
         """
         try:
             # Search for similar policies
@@ -40,12 +42,20 @@ class DraftService:
             )
             similar_policies = await similarity_service.find_similar_policies(request, store)
             most_similar_policy_id = similar_policies[0].policy_id if similar_policies else None
-            
+
+            # Log the results for debugging
+            logger.info(f"Similarity search results: {len(similar_policies)} policies found above {request.threshold} threshold")
+            if similar_policies:
+                logger.info(f"Most similar policy: {similar_policies[0].filename} with score {similar_policies[0].similarity_score:.2%}")
+            else:
+                logger.info("No similar policies found - will generate AI TOC")
+
             # Create draft structure
             draft_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
-            
-            # Get the most similar policy ID (if any)
+
+            # Track TOC source for response
+            toc_source = "similarity_search"
 
             draft_metadata = DraftMetadata(
                 id=draft_id,
@@ -57,8 +67,8 @@ class DraftService:
                 modified_at=now.isoformat(),
                 most_similar_policy_id=most_similar_policy_id
             )
-            
-            draft_to_save = CompleteDraft( 
+
+            draft_to_save = CompleteDraft(
                 id=str(uuid.uuid4()),
                 metadata=draft_metadata,
                 toc=[]
@@ -67,11 +77,35 @@ class DraftService:
             if similar_policies:
                 # Transform the TOC to properly set source_topic_id and source_subtopic_id
                 draft_to_save.toc = self._transform_toc_for_draft(similar_policies[0].toc)
+                logger.info(f"Using TOC from similar policy: {most_similar_policy_id}")
+            else:
+                # No similar policies found - generate TOC using LLM
+                logger.info("No similar policies found. Generating TOC using AI...")
+                toc_source = "ai_generated"
+
+                if llm_service:
+                    # Initialize TOC generation service
+                    toc_generator = TOCGenerationService(llm_service)
+
+                    # Generate TOC based on description
+                    generated_toc = await toc_generator.generate_toc_from_description(
+                        description=description,
+                        title=title,
+                        client_metadata=client_metadata
+                    )
+
+                    # Transform to draft format (mark as AI-generated)
+                    draft_to_save.toc = self._transform_ai_generated_toc(generated_toc)
+                    logger.info(f"Generated TOC with {len(draft_to_save.toc)} topics using AI")
+                else:
+                    # Fallback to basic structure if no LLM service available
+                    logger.warning("No LLM service available for TOC generation, using basic template")
+                    draft_to_save.toc = self._get_basic_toc_template()
 
             success = self.storage.create_draft(draft_to_save)
 
             if success:
-                logger.info(f"Initialized draft {draft_to_save.id} with {len(draft_to_save.toc)} suggested topics")
+                logger.info(f"Initialized draft {draft_to_save.id} with {len(draft_to_save.toc)} suggested topics (source: {toc_source})")
                 draft_dict = draft_to_save.model_dump()
 
                 return {
@@ -79,13 +113,14 @@ class DraftService:
                     "draft": draft_dict,
                     "similar_policies_found": len(similar_policies),
                     "most_similar_policy_id": most_similar_policy_id,
-                    "client_metadata": client_metadata.model_dump()
+                    "client_metadata": client_metadata.model_dump(),
+                    "toc_source": toc_source  # New field to indicate TOC source
                 }
             else:
                 logger.error(f"Failed to save initialized draft {draft_to_save.id}")
                 return None
 
-                
+
         except Exception as e:
             logger.error(f"Failed to initialize draft: {e}")
             return None
@@ -119,6 +154,108 @@ class DraftService:
                 topic=topic_item.get('topic', ''),
                 order=topic_item.get('order', 0),
                 source_topic_id=topic_item.get('topic_id'),  # Preserve vector DB ID
+                content="",
+                summary="",
+                conversation_history=[],
+                subtopics=subtopics
+            )
+            transformed_toc.append(topic)
+
+        return transformed_toc
+
+    def _transform_ai_generated_toc(self, ai_toc: List[Dict[str, Any]]) -> List:
+        """
+        Transform AI-generated TOC to draft format.
+        AI-generated topics don't have source_topic_id or source_subtopic_id.
+        """
+        from app.models.draft_models import TOCTopic, TOCSubtopic
+
+        transformed_toc = []
+        for topic_item in ai_toc:
+            # Create subtopics without source IDs
+            subtopics = []
+            for sub in topic_item.get('subtopics', []):
+                subtopic = TOCSubtopic(
+                    subtopic_id=sub.get('subtopic_id', str(uuid.uuid4())),
+                    topic=sub.get('topic', ''),
+                    order=sub.get('order', 0),
+                    # No source_subtopic_id for AI-generated
+                    content="",
+                    summary="",
+                    conversation_history=[]
+                )
+                subtopics.append(subtopic)
+
+            # Create topic without source ID
+            topic = TOCTopic(
+                topic_id=topic_item.get('topic_id', str(uuid.uuid4())),
+                topic=topic_item.get('topic', ''),
+                order=topic_item.get('order', 0),
+                # No source_topic_id for AI-generated
+                content="",
+                summary="",
+                conversation_history=[],
+                subtopics=subtopics
+            )
+            transformed_toc.append(topic)
+
+        return transformed_toc
+
+    def _get_basic_toc_template(self) -> List:
+        """
+        Get a basic TOC template when no similar policies and no LLM available.
+        """
+        from app.models.draft_models import TOCTopic, TOCSubtopic
+
+        basic_template = [
+            {
+                "topic": "Purpose and Scope",
+                "subtopics": [
+                    {"topic": "Policy Objectives"},
+                    {"topic": "Applicability"}
+                ]
+            },
+            {
+                "topic": "Definitions and Terms",
+                "subtopics": [
+                    {"topic": "Key Terminology"},
+                    {"topic": "Acronyms"}
+                ]
+            },
+            {
+                "topic": "Policy Requirements",
+                "subtopics": [
+                    {"topic": "Core Requirements"},
+                    {"topic": "Implementation Guidelines"}
+                ]
+            },
+            {
+                "topic": "Compliance and Monitoring",
+                "subtopics": [
+                    {"topic": "Monitoring Procedures"},
+                    {"topic": "Enforcement"}
+                ]
+            }
+        ]
+
+        transformed_toc = []
+        for idx, template_item in enumerate(basic_template, 1):
+            subtopics = []
+            for sub_idx, sub in enumerate(template_item['subtopics'], 1):
+                subtopic = TOCSubtopic(
+                    subtopic_id=str(uuid.uuid4()),
+                    topic=sub['topic'],
+                    order=sub_idx,
+                    content="",
+                    summary="",
+                    conversation_history=[]
+                )
+                subtopics.append(subtopic)
+
+            topic = TOCTopic(
+                topic_id=str(uuid.uuid4()),
+                topic=template_item['topic'],
+                order=idx,
                 content="",
                 summary="",
                 conversation_history=[],

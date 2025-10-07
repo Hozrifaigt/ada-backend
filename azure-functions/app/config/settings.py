@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_VERSION: str = "2025-01-01-preview"
     AZURE_OPENAI_EMBEDDING_DIMENSIONS: int = 1536
 
+
     AZURE_SEARCH_ENDPOINT: str
     AZURE_SEARCH_KEY: str
     AZURE_SEARCH_INDEX_NAME: str
@@ -37,6 +38,6 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = 12
     LLM_CHUNK_SIZE: int = 10000
     LLM_CHUNK_OVERLAP: int = 300
-
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
 settings = Settings()

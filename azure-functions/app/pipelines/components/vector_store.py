@@ -223,10 +223,15 @@ class AzureVectorStore:
             for i, result in enumerate(results):
                 # Parse TOC JSON
                 toc = json.loads(result.get("toc", "[]"))
-                
-                # Calculate similarity score (rank-based for simplicity)
-                similarity_score = max(95 - (i * 10), 10) / 100
-                
+
+                # Get the actual similarity score from Azure Search
+                # Azure returns scores as @search.score, which is accessible as a property
+                actual_score = getattr(result, '@search.score', 0.0)
+
+                # Normalize the score to 0-1 range if needed
+                # Azure Search scores can vary, but cosine similarity should already be 0-1
+                similarity_score = min(actual_score, 1.0)  # Cap at 1.0 just in case
+
                 if similarity_score >= threshold:
                     processed_results.append({
                         "id": result["id"],
@@ -271,8 +276,13 @@ class AzureVectorStore:
                 # Parse subtopics JSON
                 subtopics = json.loads(result.get("subtopics", "[]"))
 
-                # Calculate similarity score (rank-based for simplicity)
-                similarity_score = max(95 - (i * 10), 10) / 100
+                # Get the actual similarity score from Azure Search
+                # Azure returns scores as @search.score, which is accessible as a property
+                actual_score = getattr(result, '@search.score', 0.0)
+
+                # Normalize the score to 0-1 range if needed
+                # Azure Search scores can vary, but cosine similarity should already be 0-1
+                similarity_score = min(actual_score, 1.0)  # Cap at 1.0 just in case
 
                 if similarity_score >= threshold:
                     processed_results.append({
