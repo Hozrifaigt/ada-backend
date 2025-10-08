@@ -71,26 +71,29 @@ async def validate_draft(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Validate draft creation parameters before initialization.
-    Checks description quality and provides improvement suggestions.
+    Validate draft creation parameters using LLM.
+    The LLM evaluates if the description is sufficient to create a meaningful policy.
     """
     logger.info(f"Draft validation requested by user: {current_user.get('email')}")
+    logger.info(f"Validating description: {request.description[:100]}...")
 
     try:
         from app.services.draft_validation_service import DraftValidationService
         from app.prompts.manager import PromptManager
         from app.config.settings import settings
 
-        # Initialize validation service
+        # Initialize validation service with LLM
         prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
         validation_service = DraftValidationService(llm, prompt_manager)
 
-        # Validate the request
+        # Validate using LLM
         validation_result = await validation_service.validate_draft_request(
             title=request.title,
             description=request.description,
             client_metadata=request.client_metadata.dict()
         )
+
+        logger.info(f"Validation result: is_valid={validation_result.get('is_valid')}, score={validation_result.get('description_quality_score')}")
 
         return ValidateDraftResponse(**validation_result)
 

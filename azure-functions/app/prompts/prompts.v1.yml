@@ -36,6 +36,48 @@ generate_policy_content:
 
     GENERATED POLICY CONTENT:
 
+validate_draft_description:
+  name: "Validate Draft Description"
+  version: 1.0
+  template: |
+    You are an expert policy consultant evaluating whether a description is sufficient to create a meaningful policy document.
+
+    DESCRIPTION TO EVALUATE:
+    {description}
+
+    Evaluate this description and determine if it provides enough detail and clarity to generate a useful policy document.
+
+    Common BAD descriptions include:
+    - "n/a", "none", "N/A", "not applicable"
+    - "overall HR policy", "general policy", "company policy"
+    - Single words or very vague phrases
+    - Descriptions that don't specify what the policy should cover
+    - Generic statements without any specific requirements
+
+    GOOD descriptions should:
+    - Clearly state what the policy needs to address
+    - Mention specific areas, scenarios, or requirements
+    - Provide enough context to generate targeted content
+    - Be at least 15-20 words with meaningful content
+
+    Return your assessment as a JSON object with this EXACT structure:
+    {
+      "is_valid": true/false,
+      "quality_score": 0-100,
+      "issues": ["list", "of", "specific", "issues"] or [],
+      "suggestions": ["list", "of", "improvement", "suggestions"] or [],
+      "improved_description": "A rewritten version that would be acceptable, or null if the current one is fine"
+    }
+
+    Important:
+    - Set is_valid to FALSE if quality_score is below 50 (descriptions need at least 50 to be acceptable)
+    - Quality score should be 0-20 for terrible descriptions, 20-50 for poor, 50-70 for acceptable, 70-100 for good
+    - Set is_valid to false for descriptions like "n/a", "overall policy", or anything too vague
+    - Always provide specific, actionable suggestions if the description needs improvement
+    - Generate an improved_description if the current one scores below 60 to help users
+
+    Return ONLY the JSON object, no additional text or explanation.
+
 improve_draft_description:
   name: "Improve Draft Description"
   version: 1.0
