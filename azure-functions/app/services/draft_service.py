@@ -334,38 +334,38 @@ class DraftService:
         Handles different input formats and ensures required fields are present.
         """
         formatted_toc = []
-        
+
         for idx, item in enumerate(raw_toc, 1):
             # Handle different possible input formats
             if isinstance(item, dict):
                 # Extract title from 'topic' field or 'title' field
-                title = item.get('topic', f'Topic {idx}')
-                
+                title = item.get('topic', item.get('title', f'Topic {idx}'))
+
                 formatted_topic = {
-                    'topic_id': item.get('id') or str(uuid.uuid4()),  # Use 'id' for draft topic ID
+                    'topic_id': item.get('topic_id') or item.get('id') or str(uuid.uuid4()),  # Check both 'topic_id' and 'id'
                     'title': title.strip(),
                     'order': item.get('order', idx),
                     'source_topic_id': item.get('source_topic_id'),  # Preserve source_topic_id if it exists
                     'subtopics': []
                 }
-                
+
                 # Handle subtopics if they exist
                 subtopics = item.get('subtopics', [])
                 if subtopics:
                     for sub_idx, subtopic in enumerate(subtopics, 1):
                         if isinstance(subtopic, dict):
                             sub_title = subtopic.get('title') or subtopic.get('topic', f'Subtopic {sub_idx}')
-                            
+
                             formatted_subtopic = {
-                                'id': subtopic.get('id') or str(uuid.uuid4()),
+                                'id': subtopic.get('subtopic_id') or subtopic.get('id') or str(uuid.uuid4()),  # Check both 'subtopic_id' and 'id'
                                 'title': sub_title.strip(),
                                 'order': subtopic.get('order', sub_idx),
                                 'source_subtopic_id': subtopic.get('source_subtopic_id')  # Preserve source_subtopic_id if it exists
                             }
                             formatted_topic['subtopics'].append(formatted_subtopic)
-                
+
                 formatted_toc.append(formatted_topic)
-        
+
         return formatted_toc
     
     def update_toc(self, draft_id: str, updated_toc: List[Dict[str, Any]]) -> bool:

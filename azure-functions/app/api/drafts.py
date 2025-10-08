@@ -27,6 +27,13 @@ from app.models.draft_models import (
     TopicContext,
     ContentGenerationResponse
 )
+from app.models.toc_chat_models import (
+    TOCChatMessage,
+    TOCChatResponse,
+    TOCConfirmRequest,
+    TOCConfirmResponse,
+    TOCOperation
+)
 
 
 logger = logging.getLogger(__name__)
@@ -520,4 +527,269 @@ async def export_draft_to_pdf(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to export draft to PDF"
+        )
+
+
+# TOC Chat Endpoints
+
+@router.post("/{draft_id}/toc/chat")
+async def chat_modify_toc(
+    draft_id: str,
+    message: TOCChatMessage,
+    draft_service: DraftService = Depends(get_draft_service),
+    llm: AzureLLM = Depends(get_llm),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> TOCChatResponse:
+    """
+    Process a natural language command to modify the Table of Contents.
+
+    This endpoint:
+    1. Parses the user's natural language command
+    2. Determines the intended TOC modification
+    3. Returns a preview of the changes
+    4. May require confirmation for destructive operations
+    """
+    logger.info(f"TOC chat for draft {draft_id}: '{message.message[:50]}...' by user: {current_user.get('email')}")
+
+    try:
+        # Get the draft
+        draft = draft_service.get_draft(draft_id)
+        if not draft:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Draft {draft_id} not found"
+            )
+
+        # Initialize TOC manipulation service
+        from app.services.toc_manipulation_service import TOCManipulationService
+        from app.prompts.manager import PromptManager
+        from app.config.settings import settings
+
+        prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
+        toc_service = TOCManipulationService(llm, prompt_manager)
+
+        # Prepare draft context - draft is a dictionary
+        metadata = draft.get('metadata', {})
+        client_metadata = metadata.get('client_metadata', {})
+
+        draft_context = {
+            'title': metadata.get('title', ''),
+            'description': metadata.get('description', ''),
+            'industry': client_metadata.get('industry', ''),
+            'company_name': client_metadata.get('name', ''),
+            'city': client_metadata.get('city', ''),
+            'country': client_metadata.get('country', '')
+        }
+
+        # Parse the command
+        parsed_operation = await toc_service.parse_toc_command(
+            user_command=message.message,
+            current_toc=draft.get('toc', []),
+            conversation_history=message.conversation_history,
+            draft_context=draft_context
+        )
+
+        # Check for errors
+        if parsed_operation.get('action') == 'error':
+            return TOCChatResponse(
+                success=False,
+                operation=None,
+                preview_toc=None,
+                current_toc=draft.get('toc', []),
+                message=parsed_operation.get('error', 'Could not understand the command'),
+                follow_up_question=None
+            )
+
+        # Check if clarification is needed
+        if parsed_operation.get('action') == 'clarification_needed':
+            return TOCChatResponse(
+                success=True,
+                operation=None,
+                preview_toc=None,
+                current_toc=draft.get('toc', []),
+                message="I need more information to complete this action.",
+                follow_up_question=parsed_operation.get('follow_up_question')
+            )
+
+        # Create operation object
+        operation = TOCOperation(
+            action=parsed_operation['action'],
+            parameters=parsed_operation.get('parameters', {}),
+            interpretation=parsed_operation.get('interpretation', ''),
+            requires_confirmation=parsed_operation.get('requires_confirmation', False) or parsed_operation['action'] == 'suggest_topics'
+        )
+
+        # Handle different action types
+        preview_toc = None
+        success_message = ""
+        ai_suggestions = None
+
+        try:
+            if parsed_operation['action'] == 'suggest_topics':
+                # Generate AI-powered suggestions
+                params = parsed_operation.get('parameters', {})
+                suggestions_data = await toc_service.generate_topic_suggestions(
+                    user_query=params.get('query', message.message),
+                    current_toc=draft.get('toc', []),
+                    draft_context=draft_context
+                )
+
+                # Format suggestions into a message
+                if suggestions_data.get('suggestions'):
+                    success_message = f"Here are my suggestions based on your request:\n\n"
+                    for i, suggestion in enumerate(suggestions_data['suggestions'], 1):
+                        success_message += f"{i}. **{suggestion['title']}** ({suggestion['type']})\n"
+                        success_message += f"   {suggestion['description']}\n"
+                        if suggestion.get('proposed_position'):
+                            success_message += f"   Proposed position: {suggestion['proposed_position']}\n"
+                        if suggestion.get('subtopics'):
+                            success_message += f"   Suggested subtopics: {', '.join(suggestion['subtopics'])}\n"
+                        success_message += "\n"
+
+                    if suggestions_data.get('rationale'):
+                        success_message += f"\n**Rationale:** {suggestions_data['rationale']}"
+
+                    ai_suggestions = suggestions_data['suggestions']
+                else:
+                    success_message = "I couldn't generate suggestions based on your request."
+
+                # For suggestions, store them in the operation for later application
+                operation.parameters['suggestions'] = ai_suggestions
+
+                # Generate preview of what the TOC will look like with suggestions applied
+                if ai_suggestions:
+                    preview_toc, _ = toc_service.execute_toc_operation(
+                        operation={'action': 'suggest_topics', 'parameters': {'suggestions': ai_suggestions}},
+                        current_toc=draft.get('toc', []),
+                        preserve_content=True
+                    )
+                else:
+                    preview_toc = draft.get('toc', [])
+            else:
+                # Execute normal TOC modification
+                preview_toc, success_message = toc_service.execute_toc_operation(
+                    operation=parsed_operation,
+                    current_toc=draft.get('toc', []),
+                    preserve_content=True
+                )
+        except Exception as e:
+            logger.error(f"Error executing TOC operation: {e}")
+            return TOCChatResponse(
+                success=False,
+                operation=operation,
+                preview_toc=None,
+                current_toc=draft.get('toc', []),
+                message=f"Error: {str(e)}",
+                follow_up_question=None
+            )
+
+        # Generate follow-up suggestions
+        suggestions = []
+        if parsed_operation['action'] == 'suggest_topics' and ai_suggestions:
+            # For AI suggestions, offer to add the suggested topics
+            suggestions.append("Would you like me to add any of these suggested topics to your document?")
+            suggestions.append("You can say something like 'Add topic 1 and 3' or 'Add all suggestions'")
+        elif parsed_operation['action'] == 'add_topic' and 'subtopics' not in parsed_operation.get('parameters', {}):
+            suggestions.append("Would you like me to suggest subtopics for this new topic?")
+        elif parsed_operation['action'] in ['remove_topic', 'remove_subtopic']:
+            suggestions.append("Would you like to move the content somewhere else first?")
+
+        return TOCChatResponse(
+            success=True,
+            operation=operation,
+            preview_toc=preview_toc,
+            current_toc=draft.get('toc', []),
+            message=success_message,
+            follow_up_question=parsed_operation.get('follow_up_question'),
+            suggestions=suggestions if suggestions else None
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to process TOC chat: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process TOC modification: {str(e)}"
+        )
+
+
+@router.post("/{draft_id}/toc/confirm")
+async def confirm_toc_modification(
+    draft_id: str,
+    request: TOCConfirmRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    llm: AzureLLM = Depends(get_llm),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> TOCConfirmResponse:
+    """
+    Confirm and apply a TOC modification after preview.
+
+    This endpoint applies the previously parsed operation to actually
+    modify the draft's Table of Contents.
+    """
+    logger.info(f"Confirming TOC modification for draft {draft_id}: {request.operation.action} by user: {current_user.get('email')}")
+
+    try:
+        # Get the draft
+        draft = draft_service.get_draft(draft_id)
+        if not draft:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Draft {draft_id} not found"
+            )
+
+        # Initialize TOC manipulation service
+        from app.services.toc_manipulation_service import TOCManipulationService
+        from app.prompts.manager import PromptManager
+        from app.config.settings import settings
+
+        # Initialize prompt manager (llm is already injected via dependency)
+        prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
+        toc_service = TOCManipulationService(llm, prompt_manager)
+
+        # Execute the operation
+        try:
+            updated_toc, success_message = toc_service.execute_toc_operation(
+                operation=request.operation.dict(),
+                current_toc=request.current_toc,
+                preserve_content=True
+            )
+        except Exception as e:
+            logger.error(f"Error executing TOC operation: {e}")
+            return TOCConfirmResponse(
+                success=False,
+                updated_toc=draft.get('toc', []),
+                message=f"Failed to apply changes: {str(e)}",
+                undo_available=False
+            )
+
+        # Update the draft with new TOC
+        success = draft_service.update_toc(draft_id, updated_toc)
+
+        if not success:
+            logger.error(f"Failed to update TOC for draft {draft_id}")
+            return TOCConfirmResponse(
+                success=False,
+                updated_toc=draft.get('toc', []),
+                message="Failed to save TOC changes to database",
+                undo_available=False
+            )
+
+        logger.info(f"Successfully applied TOC modification to draft {draft_id}")
+
+        return TOCConfirmResponse(
+            success=True,
+            updated_toc=updated_toc,
+            message=success_message,
+            undo_available=True  # We could implement undo by storing previous TOC
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to confirm TOC modification: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to apply TOC modification: {str(e)}"
         )

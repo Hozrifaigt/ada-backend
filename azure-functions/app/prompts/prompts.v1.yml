@@ -266,3 +266,139 @@ generate_toc_from_description:
     Return ONLY the JSON array, no additional text or explanation.
 
     JSON TOC:
+
+
+parse_toc_modification:
+  template: |
+    You are an expert assistant helping to modify the Table of Contents (TOC) of a policy document through natural language commands.
+
+    DOCUMENT CONTEXT:
+    - Title: {draft_title}
+    - Description: {draft_description}
+    - Company: {company_name}
+    - Industry: {industry}
+    - Location: {city}, {country}
+
+    CURRENT TABLE OF CONTENTS:
+    {current_toc}
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    USER COMMAND:
+    {user_command}
+
+    TASK:
+    Parse the user's natural language command and determine what modification they want to make to the TOC.
+
+    IMPORTANT: Use "suggest_topics" action when the user asks for:
+    - Suggestions or recommendations for topics/subtopics
+    - What topics should be added for specific requirements
+    - Ideas for improving the document structure
+    - Topics related to compliance, regulations, or best practices
+    - Examples: "What security topics should I include?", "Suggest data privacy sections", "What's missing for GDPR compliance?"
+
+    Use other actions (add_topic, remove_topic, etc.) when the user gives specific instructions to modify the TOC directly.
+
+    Possible actions include:
+    - suggest_topics: Suggest new topics/subtopics based on user requirements
+    - add_topic: Add a new main topic
+    - add_subtopic: Add a subtopic to an existing topic
+    - remove_topic: Remove a main topic
+    - remove_subtopic: Remove a subtopic
+    - rename_topic: Rename a main topic
+    - rename_subtopic: Rename a subtopic
+    - reorder_topics: Change the order of main topics
+    - reorder_subtopics: Change the order of subtopics within a topic
+    - move_topic: Move a topic to a different position
+    - move_subtopic: Move a subtopic to a different topic or position
+    - split_topic: Split one topic into two
+    - merge_topics: Merge two or more topics into one
+
+    IMPORTANT: Return your analysis as a JSON object with the following structure:
+    {{
+      "action": "action_type",
+      "parameters": {{
+        // action-specific parameters
+        // For suggest_topics: "query", "context", "num_suggestions" (optional, default 5)
+        // For add_topic: "title", "position", "subtopics" (optional array)
+        // For add_subtopic: "topic_id", "topic_name", "title", "position"
+        // For remove_topic: "topic_id", "topic_name"
+        // For remove_subtopic: "topic_id", "subtopic_id", "subtopic_name"
+        // For rename_topic: "topic_id", "topic_name", "new_name"
+        // For rename_subtopic: "topic_id", "subtopic_id", "subtopic_name", "new_name"
+        // For reorder_topics: "new_order" (array of topic_ids)
+        // For move_topic: "topic_id", "topic_name", "new_position"
+        // For move_subtopic: "source_topic_id", "target_topic_id", "subtopic_id", "new_position"
+        // For split_topic: "topic_id", "topic_name", "split_point", "new_topic_name"
+        // For merge_topics: "topic_ids", "topic_names", "merged_name"
+      }},
+      "interpretation": "Human-readable description of what will be done",
+      "requires_confirmation": true/false,
+      "follow_up_question": "Optional question to clarify or enhance the command" or null
+    }}
+
+    IMPORTANT: Set "requires_confirmation": true for:
+    - suggest_topics (always requires confirmation to apply)
+    - remove_topic or remove_subtopic (destructive operations)
+    - merge_topics (combining content)
+    - Any operation where the user might want to preview changes
+
+    If the command is unclear or ambiguous, set action to "clarification_needed" and include a follow_up_question.
+
+    Use the IDs from the current TOC when available. If the user refers to topics by name, include both the name and try to match it to the ID.
+    For remove operations, always include both topic_id (if found) and topic_name to ensure proper matching.
+
+    Return ONLY the JSON object, no additional text.
+
+    JSON RESPONSE:
+
+
+suggest_toc_topics:
+  template: |
+    You are an AI assistant helping to suggest relevant topics and subtopics for a policy document.
+
+    DOCUMENT CONTEXT:
+    - Title: {draft_title}
+    - Description: {draft_description}
+    - Industry: {industry}
+    - Location: {city}, {country}
+
+    CURRENT TABLE OF CONTENTS:
+    {current_toc}
+
+    USER REQUEST:
+    {user_query}
+
+    TASK:
+    Based on the user's request and the document context, suggest relevant topics and/or subtopics that would enhance the policy document. Consider:
+    1. Industry-specific requirements and regulations for {industry}
+    2. Local compliance needs in {country}
+    3. Best practices and standards
+    4. Topics that complement the existing structure
+    5. The specific focus mentioned in the user's request
+
+    Provide suggestions that are:
+    - Relevant to the document's purpose
+    - Not duplicating existing topics
+    - Specific and actionable
+    - Appropriate for the {industry} industry
+    - Compliant with {country} regulations
+
+    Return your suggestions as a JSON object with the following structure:
+    {{
+      "suggestions": [
+        {{
+          "type": "topic" or "subtopic",
+          "title": "Suggested title",
+          "description": "Brief explanation of why this is relevant",
+          "parent_topic": "Name of parent topic if this is a subtopic suggestion",
+          "proposed_position": "Where this might fit (e.g., 'after Security Policy', 'under Data Protection')",
+          "subtopics": ["List of suggested subtopics if this is a topic"] // optional
+        }}
+      ],
+      "rationale": "Overall explanation of why these suggestions are relevant",
+      "additional_notes": "Any additional context or recommendations"
+    }}
+
+    JSON RESPONSE:
