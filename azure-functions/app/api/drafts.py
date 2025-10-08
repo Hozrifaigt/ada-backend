@@ -17,6 +17,8 @@ from app.api.policy.search.similarity_service import SimilarityService
 from app.models.draft_models import (
     InitializeDraftRequest,
     InitializeDraftResponse,
+    ValidateDraftRequest,
+    ValidateDraftResponse,
     UpdateTOCRequest,
     GenerateContentRequest,
     UpdateContentRequest,
@@ -60,6 +62,47 @@ def get_vector_store():
 def get_llm_service():
     """Dependency to get LLM service."""
     return get_llm()
+
+
+@router.post("/validate", response_model=ValidateDraftResponse)
+async def validate_draft(
+    request: ValidateDraftRequest,
+    llm: AzureLLM = Depends(get_llm),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Validate draft creation parameters before initialization.
+    Checks description quality and provides improvement suggestions.
+    """
+    logger.info(f"Draft validation requested by user: {current_user.get('email')}")
+
+    try:
+        from app.services.draft_validation_service import DraftValidationService
+        from app.prompts.manager import PromptManager
+        from app.config.settings import settings
+
+        # Initialize validation service
+        prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
+        validation_service = DraftValidationService(llm, prompt_manager)
+
+        # Validate the request
+        validation_result = await validation_service.validate_draft_request(
+            title=request.title,
+            description=request.description,
+            client_metadata=request.client_metadata.dict()
+        )
+
+        return ValidateDraftResponse(**validation_result)
+
+    except Exception as e:
+        logger.error(f"Error validating draft: {e}")
+        return ValidateDraftResponse(
+            is_valid=False,
+            issues=[f"Validation error: {str(e)}"],
+            suggestions=["Please try again or contact support if the issue persists"],
+            description_quality_score=0,
+            improved_description=None
+        )
 
 
 @router.post("/initialize", response_model=InitializeDraftResponse)

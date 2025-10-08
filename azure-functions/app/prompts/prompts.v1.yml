@@ -36,6 +36,34 @@ generate_policy_content:
 
     GENERATED POLICY CONTENT:
 
+improve_draft_description:
+  name: "Improve Draft Description"
+  version: 1.0
+  template: |
+    You are an expert HR and policy consultant helping organizations create comprehensive policies.
+
+    The user has provided a low-quality description for a policy document they want to create.
+    Your task is to improve this description to be more specific, detailed, and actionable.
+
+    ORIGINAL DESCRIPTION: {original_description}
+    POLICY TITLE: {title}
+    ORGANIZATION INDUSTRY: {industry}
+    COMPANY NAME: {company_name}
+    LOCATION: {city}, {country}
+
+    Please create an improved description that:
+    1. Is specific about what the policy should cover
+    2. Mentions key areas and scenarios that should be addressed
+    3. Is relevant to the {industry} industry
+    4. Is at least 30-50 words long
+    5. Provides clear direction for policy content generation
+    6. Avoids generic statements like "overall policy" or "general guidelines"
+
+    Write the improved description in a professional tone, as if the client wrote it themselves.
+    Do not include any meta-commentary, just provide the improved description text.
+
+    IMPROVED DESCRIPTION:
+
 generate_from_empty:
   name: "Generate Policy From Empty Topic"
   version: 1.0
@@ -304,7 +332,8 @@ parse_toc_modification:
     - suggest_topics: Suggest new topics/subtopics based on user requirements
     - add_topic: Add a new main topic
     - add_subtopic: Add a subtopic to an existing topic
-    - remove_topic: Remove a main topic
+    - remove_topic: Remove a single main topic
+    - remove_topics: Remove multiple main topics (use when user wants to delete 2 or more topics)
     - remove_subtopic: Remove a subtopic
     - rename_topic: Rename a main topic
     - rename_subtopic: Rename a subtopic
@@ -323,7 +352,8 @@ parse_toc_modification:
         // For suggest_topics: "query", "context", "num_suggestions" (optional, default 5)
         // For add_topic: "title", "position", "subtopics" (optional array)
         // For add_subtopic: "topic_id", "topic_name", "title", "position"
-        // For remove_topic: "topic_id", "topic_name"
+        // For remove_topic: "topic_id", "topic_name" (for single topic removal)
+        // For remove_topics: "topic_ids" (array), "topic_names" (array) (for multiple topics)
         // For remove_subtopic: "topic_id", "subtopic_id", "subtopic_name"
         // For rename_topic: "topic_id", "topic_name", "new_name"
         // For rename_subtopic: "topic_id", "subtopic_id", "subtopic_name", "new_name"
@@ -340,7 +370,7 @@ parse_toc_modification:
 
     IMPORTANT: Set "requires_confirmation": true for:
     - suggest_topics (always requires confirmation to apply)
-    - remove_topic or remove_subtopic (destructive operations)
+    - remove_topic, remove_topics, or remove_subtopic (destructive operations)
     - merge_topics (combining content)
     - Any operation where the user might want to preview changes
 
@@ -348,6 +378,11 @@ parse_toc_modification:
 
     Use the IDs from the current TOC when available. If the user refers to topics by name, include both the name and try to match it to the ID.
     For remove operations, always include both topic_id (if found) and topic_name to ensure proper matching.
+
+    IMPORTANT for deletion commands:
+    - If user wants to delete ONE topic (e.g., "delete topic 3", "remove the security section"), use "remove_topic"
+    - If user wants to delete MULTIPLE topics (e.g., "delete topics 3 and 4", "remove topics 2, 3, and 5"), use "remove_topics"
+    - When user refers to topics by number (e.g., "topic 3"), include that in topic_name or topic_names
 
     Return ONLY the JSON object, no additional text.
 

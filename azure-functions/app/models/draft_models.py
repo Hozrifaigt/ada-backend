@@ -40,12 +40,27 @@ class UpdateContentRequest(BaseModel):
 
 
 
+class ValidateDraftRequest(BaseModel):
+    """Request to validate draft creation parameters."""
+    title: str = Field(..., min_length=1, max_length=200, description="Draft title")
+    description: str = Field(..., min_length=1, max_length=2000, description="Policy description to validate")
+    client_metadata: ClientMetadata = Field(..., description="Client metadata")
+
+
 class ExportRequest(BaseModel):
     """Request to export draft."""
     delete_after_export: bool = Field(default=True, description="Delete draft after successful export")
 
 
 # ============= Response Models =============
+
+class ValidateDraftResponse(BaseModel):
+    """Response for draft validation."""
+    is_valid: bool = Field(..., description="Whether the draft parameters are valid")
+    issues: List[str] = Field(default=[], description="List of validation issues")
+    suggestions: List[str] = Field(default=[], description="Suggestions for improvement")
+    description_quality_score: int = Field(..., description="Quality score for description (0-100)")
+    improved_description: Optional[str] = Field(None, description="Suggested improved description")
 
 class InitializeDraftResponse(BaseModel):
     """Response after initializing a draft."""

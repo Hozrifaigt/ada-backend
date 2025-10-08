@@ -129,6 +129,8 @@ class TOCManipulationService:
                 return self._add_subtopic(current_toc, params, preserve_content)
             elif action == 'remove_topic':
                 return self._remove_topic(current_toc, params, preserve_content)
+            elif action == 'remove_topics':
+                return self._remove_multiple_topics(current_toc, params, preserve_content)
             elif action == 'remove_subtopic':
                 return self._remove_subtopic(current_toc, params, preserve_content)
             elif action == 'rename_topic':
@@ -312,9 +314,31 @@ class TOCManipulationService:
         toc_copy = []
 
         for topic in toc:
-            # Match by ID or name
-            if (topic_id and topic['topic_id'] == topic_id) or \
-               (topic_name and topic['topic'].lower() == topic_name.lower()):
+            should_remove = False
+
+            # Match by ID
+            if topic_id and topic['topic_id'] == topic_id:
+                should_remove = True
+
+            # Match by name
+            elif topic_name:
+                # Direct name match
+                if topic['topic'].lower() == str(topic_name).lower():
+                    should_remove = True
+                # Position-based match (e.g., "topic 3", "3", "third topic")
+                elif str(topic_name).lower().startswith('topic '):
+                    try:
+                        position = int(str(topic_name).lower().replace('topic ', '').strip())
+                        if topic['order'] == position:
+                            should_remove = True
+                    except (ValueError, AttributeError):
+                        pass
+                # Just a number (e.g., "3")
+                elif str(topic_name).isdigit():
+                    if topic['order'] == int(topic_name):
+                        should_remove = True
+
+            if should_remove:
                 removed_topic = topic
             else:
                 toc_copy.append(topic)
@@ -330,6 +354,63 @@ class TOCManipulationService:
         message = f"Removed topic '{removed_topic.get('topic', 'Unknown')}'"
 
         if preserve_content and removed_topic.get('content'):
+            message += " (content was preserved and can be restored)"
+
+        return toc_copy, message
+
+    def _remove_multiple_topics(self, toc: List[Dict], params: Dict, preserve_content: bool) -> Tuple[List[Dict], str]:
+        """Remove multiple topics from the TOC."""
+        topic_ids = params.get('topic_ids', [])
+        topic_names = params.get('topic_names', [])
+
+        # Build a list of topics to remove
+        topics_to_remove = set()
+        removed_names = []
+
+        for topic in toc:
+            should_remove = False
+
+            # Check if topic ID matches any in the list
+            if topic_ids and topic['topic_id'] in topic_ids:
+                should_remove = True
+
+            # Check if topic name matches any in the list
+            if topic_names:
+                for name in topic_names:
+                    if name and topic['topic'].lower() == str(name).lower():
+                        should_remove = True
+                        break
+
+            # Also check if topic matches by position (e.g., "topic 3" means the 3rd topic)
+            if topic_names:
+                for name in topic_names:
+                    if name and str(name).lower().startswith('topic '):
+                        try:
+                            position = int(str(name).lower().replace('topic ', '').strip())
+                            if topic['order'] == position:
+                                should_remove = True
+                                break
+                        except (ValueError, AttributeError):
+                            pass
+
+            if should_remove:
+                topics_to_remove.add(topic['topic_id'])
+                removed_names.append(topic.get('topic', 'Unknown'))
+
+        if not topics_to_remove:
+            error_msg = f"No topics found matching: {', '.join(topic_names) if topic_names else 'specified IDs'}"
+            raise ValueError(error_msg)
+
+        # Create new TOC without the removed topics
+        toc_copy = [topic for topic in toc if topic['topic_id'] not in topics_to_remove]
+
+        # Reorder remaining topics
+        for i, topic in enumerate(toc_copy):
+            topic['order'] = i + 1
+
+        message = f"Removed {len(removed_names)} topic(s): {', '.join(removed_names)}"
+
+        if preserve_content:
             message += " (content was preserved and can be restored)"
 
         return toc_copy, message
@@ -771,7 +852,7 @@ class TOCManipulationService:
         # Check if confirmation is needed
         if 'requires_confirmation' not in parsed:
             # Destructive operations need confirmation
-            destructive_actions = ['remove_topic', 'remove_subtopic', 'merge_topics', 'split_topic']
+            destructive_actions = ['remove_topic', 'remove_topics', 'remove_subtopic', 'merge_topics', 'split_topic']
             parsed['requires_confirmation'] = action in destructive_actions
 
         # Validate topic/subtopic IDs exist
@@ -809,6 +890,7 @@ class TOCManipulationService:
             'add_topic': f"Add a new topic '{params.get('title', 'New Topic')}'",
             'add_subtopic': f"Add a new subtopic '{params.get('title', 'New Subtopic')}'",
             'remove_topic': f"Remove the topic '{params.get('topic_name', 'Unknown')}'",
+            'remove_topics': f"Remove {len(params.get('topic_names', params.get('topic_ids', [])))} topics",
             'remove_subtopic': f"Remove the subtopic '{params.get('subtopic_name', 'Unknown')}'",
             'rename_topic': f"Rename topic to '{params.get('new_name', 'New Name')}'",
             'rename_subtopic': f"Rename subtopic to '{params.get('new_name', 'New Name')}'",
