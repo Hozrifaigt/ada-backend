@@ -32,7 +32,7 @@ class DraftValidationService:
             )
 
             # Get LLM response
-            response = await self.llm.generate(prompt, max_tokens=500)
+            response = await self.llm.generate(prompt)
 
             # Parse JSON response
             try:
@@ -72,26 +72,14 @@ class DraftValidationService:
         Complete validation of a draft request using LLM.
 
         Args:
-            title: Draft title
+            title: Draft title (not validated)
             description: Draft description to validate
             client_metadata: Client metadata (not used in LLM validation)
 
         Returns:
             Dictionary with validation results
         """
-        # Simple title validation (keep this rule-based)
-        title_issues = []
-        if len(title.strip()) < 5:
-            title_issues.append("Title is too short (minimum 5 characters)")
-        if title.strip().lower() in ['test', 'draft', 'policy']:
-            title_issues.append("Title is too generic")
-
-        # LLM validation for description
+        # Only validate description with LLM, no title validation
         validation_result = await self.validate_description_with_llm(description)
-
-        # Combine title issues with description validation
-        if title_issues:
-            validation_result["issues"] = title_issues + validation_result.get("issues", [])
-            validation_result["is_valid"] = False
 
         return validation_result

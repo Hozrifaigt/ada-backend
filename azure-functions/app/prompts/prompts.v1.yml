@@ -61,13 +61,13 @@ validate_draft_description:
     - Be at least 15-20 words with meaningful content
 
     Return your assessment as a JSON object with this EXACT structure:
-    {
-      "is_valid": true/false,
-      "quality_score": 0-100,
+    {{
+      "is_valid": true or false,
+      "quality_score": number between 0 and 100,
       "issues": ["list", "of", "specific", "issues"] or [],
       "suggestions": ["list", "of", "improvement", "suggestions"] or [],
-      "improved_description": "A rewritten version that would be acceptable, or null if the current one is fine"
-    }
+      "improved_description": "A rewritten version that would be acceptable" or null
+    }}
 
     Important:
     - Set is_valid to FALSE if quality_score is below 50 (descriptions need at least 50 to be acceptable)
