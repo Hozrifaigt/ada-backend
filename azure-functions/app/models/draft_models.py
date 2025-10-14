@@ -172,6 +172,7 @@ class DraftMetadata(BaseModel):
     modified_at: str
     client_metadata: ClientMetadata
     most_similar_policy_id: Optional[str] = None
+    toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
 
 
 class CompleteDraft(BaseModel):

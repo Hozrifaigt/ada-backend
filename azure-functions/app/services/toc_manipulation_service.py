@@ -851,9 +851,10 @@ class TOCManipulationService:
 
         # Check if confirmation is needed
         if 'requires_confirmation' not in parsed:
-            # Destructive operations need confirmation
-            destructive_actions = ['remove_topic', 'remove_topics', 'remove_subtopic', 'merge_topics', 'split_topic']
-            parsed['requires_confirmation'] = action in destructive_actions
+            # Most operations should require confirmation for better UX (user can preview changes)
+            # Only very simple, non-destructive actions can skip confirmation
+            no_confirmation_actions = []  # Currently all actions require confirmation
+            parsed['requires_confirmation'] = action not in no_confirmation_actions
 
         # Validate topic/subtopic IDs exist
         if 'parameters' in parsed:

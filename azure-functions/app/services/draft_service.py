@@ -65,7 +65,8 @@ class DraftService:
                 created_by=user_id,
                 created_at=now.isoformat(),
                 modified_at=now.isoformat(),
-                most_similar_policy_id=most_similar_policy_id
+                most_similar_policy_id=most_similar_policy_id,
+                toc_source=toc_source  # Store the TOC source
             )
 
             draft_to_save = CompleteDraft(
@@ -82,6 +83,7 @@ class DraftService:
                 # No similar policies found - generate TOC using LLM
                 logger.info("No similar policies found. Generating TOC using AI...")
                 toc_source = "ai_generated"
+                draft_to_save.metadata.toc_source = toc_source  # Update metadata
 
                 if llm_service:
                     # Initialize TOC generation service

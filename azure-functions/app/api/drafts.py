@@ -680,20 +680,42 @@ async def chat_modify_toc(
                     draft_context=draft_context
                 )
 
-                # Format suggestions into a message
+                # Format suggestions into a message with better readability
                 if suggestions_data.get('suggestions'):
-                    success_message = f"Here are my suggestions based on your request:\n\n"
+                    success_message = f"📋 **Here are my suggestions:**\n\n"
                     for i, suggestion in enumerate(suggestions_data['suggestions'], 1):
-                        success_message += f"{i}. **{suggestion['title']}** ({suggestion['type']})\n"
-                        success_message += f"   {suggestion['description']}\n"
-                        if suggestion.get('proposed_position'):
-                            success_message += f"   Proposed position: {suggestion['proposed_position']}\n"
-                        if suggestion.get('subtopics'):
-                            success_message += f"   Suggested subtopics: {', '.join(suggestion['subtopics'])}\n"
-                        success_message += "\n"
+                        # Header with title and type
+                        success_message += f"**{i}. {suggestion['title']}**\n"
+                        success_message += f"   *Type:* {suggestion['type'].title()}\n\n"
 
+                        # Description
+                        success_message += f"   {suggestion['description']}\n\n"
+
+                        # Where to add it
+                        if suggestion.get('proposed_position'):
+                            success_message += f"   📍 **Where to add:** {suggestion['proposed_position']}\n\n"
+
+                        # Subtopics if any
+                        if suggestion.get('subtopics'):
+                            success_message += f"   📂 **Subtopics:**\n"
+                            for subtopic in suggestion['subtopics']:
+                                success_message += f"      • {subtopic}\n"
+                            success_message += "\n"
+
+                        # Add spacing between suggestions for better readability
+                        if i < len(suggestions_data['suggestions']):  # Not the last one
+                            success_message += "\n"
+
+                    # Rationale at the end
                     if suggestions_data.get('rationale'):
-                        success_message += f"\n**Rationale:** {suggestions_data['rationale']}"
+                        success_message += f"💡 **Why these suggestions?**\n{suggestions_data['rationale']}\n\n"
+
+                    # Clear call to action
+                    success_message += "ℹ️ *To implement these suggestions, use specific commands like:*\n"
+                    success_message += "   • \"Add topic [name]\" - to add a new topic\n"
+                    success_message += "   • \"Remove topic 3\" - to delete by position number\n"
+                    success_message += "   • \"Move topic 5 to position 2\" - to reorder topics\n"
+                    success_message += "   • \"Merge topics 3 and 4\" - to combine topics"
 
                     ai_suggestions = suggestions_data['suggestions']
                 else:
