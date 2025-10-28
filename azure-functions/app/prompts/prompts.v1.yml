@@ -140,6 +140,9 @@ adapt_existing_content:
     Title: {document_title}
     Description: {document_description}
     Industry: {industry}
+    Unique Client Requirements: {unique_requirements}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
 
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
@@ -166,6 +169,9 @@ adapt_existing_content:
     6. Consider the context from previous conversations
     7. Build upon concepts introduced in completed topics without repeating them
     8. Include industry-specific regulations and standards relevant to {industry}
+    9. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
+    10. IMPORTANT: Consider the unique client requirements: {unique_requirements}
+    11. IMPORTANT: Detail level is "{detail_level}" - if "deep", provide comprehensive, detailed content with explanations; if "light", provide concise, high-level content
 
     ADAPTED CONTENT:
 
@@ -178,6 +184,9 @@ generate_with_references:
     Title: {document_title}
     Description: {document_description}
     Industry: {industry}
+    Unique Client Requirements: {unique_requirements}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
 
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
@@ -208,6 +217,9 @@ generate_with_references:
     7. Consider the context from previous conversations
     8. Reference or build upon completed topics when relevant without repeating their content
     9. Consider industry-specific regulations, standards, and best practices for {industry}
+    10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
+    11. IMPORTANT: Address the unique client requirements: {unique_requirements}
+    12. IMPORTANT: Detail level is "{detail_level}" - if "deep", provide comprehensive, detailed content with explanations; if "light", provide concise, high-level content
 
     CONTENT:
 
@@ -220,6 +232,9 @@ generate_from_scratch:
     Title: {document_title}
     Description: {document_description}
     Industry: {industry}
+    Unique Client Requirements: {unique_requirements}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
 
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
@@ -247,6 +262,9 @@ generate_from_scratch:
     7. Consider the context from previous conversations
     8. Build a cohesive policy by connecting to previously established concepts
     9. Apply industry-specific requirements and compliance needs for {industry}
+    10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
+    11. IMPORTANT: Address the unique client requirements: {unique_requirements}
+    12. IMPORTANT: Detail level is "{detail_level}" - if "deep", provide comprehensive, detailed content with explanations; if "light", provide concise, high-level content
 
     CONTENT:
 

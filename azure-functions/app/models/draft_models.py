@@ -8,7 +8,6 @@ from datetime import datetime
 class ClientMetadata(BaseModel):
     name: str
     country: str
-    city: str
     industry: str 
 
 
@@ -17,6 +16,9 @@ class InitializeDraftRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200, description="Draft title")
     description: str = Field(..., min_length=1, max_length=2000, description="Policy description for RAG search")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
+    unique_requirements: Optional[str] = Field(None, max_length=5000, description="Unique client requirements")
+    regulations: List[str] = Field(default_factory=list, description="Applicable regulations (e.g., 'UAE Labor Law')")
+    detail_level: str = Field(default="light", description="Level of detail: 'light' or 'deep'")
 
 
 class UpdateTOCRequest(BaseModel):
@@ -45,6 +47,9 @@ class ValidateDraftRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200, description="Draft title")
     description: str = Field(..., min_length=1, max_length=2000, description="Policy description to validate")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
+    unique_requirements: Optional[str] = Field(None, max_length=5000, description="Unique client requirements")
+    regulations: List[str] = Field(default_factory=list, description="Applicable regulations (e.g., 'UAE Labor Law')")
+    detail_level: str = Field(default="light", description="Level of detail: 'light' or 'deep'")
 
 
 class ExportRequest(BaseModel):
@@ -173,6 +178,9 @@ class DraftMetadata(BaseModel):
     client_metadata: ClientMetadata
     most_similar_policy_id: Optional[str] = None
     toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
+    unique_requirements: Optional[str] = Field(None, description="Unique client requirements")
+    regulations: List[str] = Field(default_factory=list, description="Applicable regulations")
+    detail_level: str = Field(default="light", description="Level of detail: 'light' or 'deep'")
 
 
 class CompleteDraft(BaseModel):

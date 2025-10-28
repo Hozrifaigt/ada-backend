@@ -134,7 +134,10 @@ async def initialize_draft(
             similarity_service=similarity_service,
             store=store,
             client_metadata=request.client_metadata,
-            llm_service=get_llm()  # Pass LLM service for TOC generation
+            llm_service=get_llm(),  # Pass LLM service for TOC generation
+            unique_requirements=request.unique_requirements,
+            regulations=request.regulations,
+            detail_level=request.detail_level
         )
         
         if result:

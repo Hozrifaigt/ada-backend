@@ -28,7 +28,10 @@ class DraftService:
         similarity_service,
         store,
         client_metadata: ClientMetadata,
-        llm_service=None
+        llm_service=None,
+        unique_requirements: Optional[str] = None,
+        regulations: List[str] = None,
+        detail_level: str = "light"
     ) -> Dict[str, Any]:
         """
         Initialize a new draft from user description.
@@ -66,7 +69,10 @@ class DraftService:
                 created_at=now.isoformat(),
                 modified_at=now.isoformat(),
                 most_similar_policy_id=most_similar_policy_id,
-                toc_source=toc_source  # Store the TOC source
+                toc_source=toc_source,  # Store the TOC source
+                unique_requirements=unique_requirements,
+                regulations=regulations or [],
+                detail_level=detail_level
             )
 
             draft_to_save = CompleteDraft(
