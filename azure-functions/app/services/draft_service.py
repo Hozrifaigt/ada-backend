@@ -605,12 +605,30 @@ class DraftService:
             return draft_model.model_dump()
         return None
     
-    def list_drafts(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_drafts(
+        self,
+        user_id: Optional[str] = None,
+        title: Optional[str] = None,
+        country: Optional[str] = None,
+        city: Optional[str] = None,
+        created_by: Optional[str] = None,
+        industry: Optional[str] = None,
+        function: Optional[str] = None,
+        policy_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        List all drafts. 
+        List all drafts with optional filtering.
         user_id parameter kept for compatibility but all drafts are visible to all users.
         """
-        return self.storage.list_all_drafts()
+        return self.storage.list_all_drafts(
+            title=title,
+            country=country,
+            city=city,
+            created_by=created_by,
+            industry=industry,
+            function=function,
+            policy_type=policy_type
+        )
     
     async def update_topic_content(
         self,

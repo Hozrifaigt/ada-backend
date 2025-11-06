@@ -178,19 +178,34 @@ async def initialize_draft(
 
 @router.get("/", response_model=DraftListResponse)
 async def list_drafts(
+    title: Optional[str] = None,
+    country: Optional[str] = None,
+    city: Optional[str] = None,
+    created_by: Optional[str] = None,
+    industry: Optional[str] = None,
+    function: Optional[str] = None,
+    policy_type: Optional[str] = None,
     draft_service: DraftService = Depends(get_draft_service),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """List all drafts (collaborative - all users see all drafts)."""
-    logger.info(f"Draft list requested by user: {current_user.get('email')}")
-    
+    """List all drafts with optional filtering (collaborative - all users see all drafts)."""
+    logger.info(f"Draft list requested by user: {current_user.get('email')} with filters: title={title}, country={country}, city={city}, created_by={created_by}, industry={industry}, function={function}, policy_type={policy_type}")
+
     try:
-        drafts = draft_service.list_drafts()
-        
+        drafts = draft_service.list_drafts(
+            title=title,
+            country=country,
+            city=city,
+            created_by=created_by,
+            industry=industry,
+            function=function,
+            policy_type=policy_type
+        )
+
         draft_summaries = [
             DraftSummary(**draft) for draft in drafts
         ]
-        
+
         return DraftListResponse(
             drafts=draft_summaries,
             total=len(draft_summaries)

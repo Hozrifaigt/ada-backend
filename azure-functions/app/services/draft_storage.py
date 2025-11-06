@@ -72,6 +72,8 @@ class DraftStorageService:
 
                 'client_metadata': json.dumps(draft["metadata"]['client_metadata']),
                 'most_similar_policy_id': draft["metadata"]['most_similar_policy_id'],
+                'function': draft["metadata"].get('function', ''),
+                'policy_type': draft["metadata"].get('policy_type', ''),
             }
 
             # Handle large draft data by splitting across multiple properties
@@ -259,24 +261,55 @@ class DraftStorageService:
             logger.error(f"Failed to delete draft {draft_id}: {e}")
             return False
     
-    def list_all_drafts(self) -> List[Dict[str, Any]]:
+    def list_all_drafts(
+        self,
+        title: Optional[str] = None,
+        country: Optional[str] = None,
+        city: Optional[str] = None,
+        created_by: Optional[str] = None,
+        industry: Optional[str] = None,
+        function: Optional[str] = None,
+        policy_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        List all drafts in storage.
+        List all drafts in storage with optional filtering.
         Returns a list of draft summary information (not full content).
+
+        Note: Azure Table Storage has limited query capabilities. Some filters
+        are applied at different levels:
+        - Database-level (exact match): function, policy_type
+        - Post-fetch (partial/case-insensitive): title, created_by, country, city, industry
         """
         try:
-            # Query all drafts
-            query_filter = "PartitionKey eq 'draft'"
-            
+            logger.info(f"📋 list_all_drafts called with filters: title={title}, country={country}, city={city}, created_by={created_by}, industry={industry}, function={function}, policy_type={policy_type}")
+
+            # Build query filter for database-level filtering
+            # Azure Table Storage only supports exact matches in queries
+            # Note: created_by is now post-fetch filtered for partial matching
+            query_filters = ["PartitionKey eq 'draft'"]
+
+            if function:
+                query_filters.append(f"function eq '{function}'")
+            if policy_type:
+                query_filters.append(f"policy_type eq '{policy_type}'")
+
+            query_filter = " and ".join(query_filters)
+            logger.info(f"🔍 Query filter: {query_filter}")
+
             entities = self.table_client.query_entities(
                 query_filter=query_filter,
-                select=['RowKey', 'draft_id', 'title', 'description', 
-                       'created_by', 'created_at', 'modified_at', 'client_metadata', 'most_similar_policy_id']
+                select=['RowKey', 'draft_id', 'title', 'description',
+                       'created_by', 'created_at', 'modified_at', 'client_metadata',
+                       'most_similar_policy_id', 'function', 'policy_type']
             )
-            
+
             drafts = []
+            entity_count = 0
             for entity in entities:
                 try:
+                    entity_count += 1
+                    draft_id = entity.get('draft_id')
+                    logger.info(f"Processing entity {entity_count}: draft_id={draft_id}, title={entity.get('title')}")
 
                     client_metadata = entity.get('client_metadata')
                     if client_metadata:
@@ -284,39 +317,70 @@ class DraftStorageService:
                             try:
                                 # Parse JSON string to dict
                                 client_metadata = json.loads(client_metadata)
+                                logger.info(f"  Parsed client_metadata: {client_metadata}")
                             except json.JSONDecodeError:
-                                logger.warning(f"Failed to parse client_metadata for draft {entity.get('draft_id')}")
+                                logger.warning(f"Failed to parse client_metadata for draft {draft_id}")
                                 client_metadata = None
                         # If it's already a dict, keep it as is
                         elif not isinstance(client_metadata, dict):
                             client_metadata = None
 
+                    # Apply post-fetch filters for fields in client_metadata and title
+                    # Title filter - case-insensitive partial match
+                    if title and title.lower() not in entity['title'].lower():
+                        logger.info(f"  ❌ Filtered out by title: '{title}' not in '{entity['title']}'")
+                        continue
+
+                    # Created by filter - case-insensitive partial match
+                    if created_by and created_by.lower() not in entity['created_by'].lower():
+                        logger.info(f"  ❌ Filtered out by created_by: '{created_by}' not in '{entity['created_by']}'")
+                        continue
+
+                    # Client metadata filters
+                    if client_metadata:
+                        if country and client_metadata.get('country', '').lower() != country.lower():
+                            logger.info(f"  ❌ Filtered out by country: '{country}' != '{client_metadata.get('country', '')}'")
+                            continue
+                        if city and client_metadata.get('city', '').lower() != city.lower():
+                            logger.info(f"  ❌ Filtered out by city: '{city}' != '{client_metadata.get('city', '')}'")
+                            continue
+                        if industry and client_metadata.get('industry', '').lower() != industry.lower():
+                            logger.info(f"  ❌ Filtered out by industry: '{industry}' != '{client_metadata.get('industry', '')}'")
+                            continue
+                    else:
+                        # If we're filtering on client_metadata fields but entity has no metadata, filter it out
+                        if country or city or industry:
+                            logger.info(f"  ❌ Filtered out: no client_metadata but filters require it")
+                            continue
 
                     # Get just the summary info without deserializing full draft
                     draft_summary = {
                         'draft_id': entity['draft_id'],
                         'title': entity['title'],
-                        'description': entity['description'],
+                        'description': entity.get('description', ''),
                         'created_by': entity['created_by'],
                         'created_at': entity['created_at'],
                         'modified_at': entity['modified_at'],
                         'client_metadata': client_metadata,
-                        'most_similar_policy_id': entity['most_similar_policy_id']
+                        'most_similar_policy_id': entity.get('most_similar_policy_id'),
+                        'function': entity.get('function', ''),
+                        'policy_type': entity.get('policy_type', '')
                     }
+                    logger.info(f"  ✅ Draft passed all filters: {draft_id}")
                     drafts.append(draft_summary)
                 except Exception as e:
                     logger.warning(f"Skipping malformed draft entity: {e}")
                     continue
-            
+
             # Sort by modified_at descending (most recent first)
             drafts.sort(
                 key=lambda x: x['modified_at'],
                 reverse=True
             )
-            
-            logger.info(f"Retrieved {len(drafts)} drafts")
+
+            logger.info(f"✅ Retrieved {len(drafts)} drafts after applying filters (processed {entity_count} total entities)")
             return drafts
-            
+
         except AzureError as e:
             logger.error(f"Azure error listing drafts: {e}")
             return []

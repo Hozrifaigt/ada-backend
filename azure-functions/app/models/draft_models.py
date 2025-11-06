@@ -93,6 +93,8 @@ class DraftSummary(BaseModel):
     modified_at: str
     most_similar_policy_id: Optional[str] = None
     client_metadata: Optional[Dict[str, str]] = None
+    function: Optional[str] = None
+    policy_type: Optional[str] = None
 
 
 class DraftListResponse(BaseModel):
