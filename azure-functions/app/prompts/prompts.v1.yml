@@ -12,7 +12,6 @@ summarize_document:
     
     COMPREHENSIVE SUMMARY:
 
-
 generate_policy_content:
   name: "Generate Policy Content"
   version: 1.0
@@ -131,7 +130,6 @@ generate_from_empty:
 
     GENERATED POLICY CONTENT:
 
-
 adapt_existing_content:
   template: |
     You are adapting an existing policy topic based on specific requirements.
@@ -139,10 +137,30 @@ adapt_existing_content:
     DOCUMENT CONTEXT:
     Title: {document_title}
     Description: {document_description}
+    Function: {function}
+    Policy Type: {policy_type}
     Industry: {industry}
-    Unique Client Requirements: {unique_requirements}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
     Applicable Regulations: {regulations}
     Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+    | Guidance | Assumes employee judgment | Some guidance with flexibility | Explicit, detailed direction |
+    | Content | Principles and guidelines | Key procedures with rationale | Comprehensive rules and workflows |
+
+    Apply the detail level ({detail_level}) to determine:
+    - How prescriptive vs principle-based the content should be
+    - The length and granularity of procedures
+    - The balance between "what" and "how"
+    - The level of specific examples and scenarios to include
 
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
@@ -170,11 +188,11 @@ adapt_existing_content:
     7. Build upon concepts introduced in completed topics without repeating them
     8. Include industry-specific regulations and standards relevant to {industry}
     9. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
-    10. IMPORTANT: Consider the unique client requirements: {unique_requirements}
-    11. IMPORTANT: Detail level is "{detail_level}" - if "deep", provide comprehensive, detailed content with explanations; if "light", provide concise, high-level content
+    10. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    11. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    12. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
 
     ADAPTED CONTENT:
-
 
 generate_with_references:
   template: |
@@ -183,10 +201,30 @@ generate_with_references:
     DOCUMENT CONTEXT:
     Title: {document_title}
     Description: {document_description}
+    Function: {function}
+    Policy Type: {policy_type}
     Industry: {industry}
-    Unique Client Requirements: {unique_requirements}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
     Applicable Regulations: {regulations}
     Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+    | Guidance | Assumes employee judgment | Some guidance with flexibility | Explicit, detailed direction |
+    | Content | Principles and guidelines | Key procedures with rationale | Comprehensive rules and workflows |
+
+    Apply the detail level ({detail_level}) to determine:
+    - How prescriptive vs principle-based the content should be
+    - The length and granularity of procedures
+    - The balance between "what" and "how"
+    - The level of specific examples and scenarios to include
 
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
@@ -218,11 +256,11 @@ generate_with_references:
     8. Reference or build upon completed topics when relevant without repeating their content
     9. Consider industry-specific regulations, standards, and best practices for {industry}
     10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
-    11. IMPORTANT: Address the unique client requirements: {unique_requirements}
-    12. IMPORTANT: Detail level is "{detail_level}" - if "deep", provide comprehensive, detailed content with explanations; if "light", provide concise, high-level content
+    11. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    12. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    13. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
 
     CONTENT:
-
 
 generate_from_scratch:
   template: |
@@ -231,10 +269,30 @@ generate_from_scratch:
     DOCUMENT CONTEXT:
     Title: {document_title}
     Description: {document_description}
+    Function: {function}
+    Policy Type: {policy_type}
     Industry: {industry}
-    Unique Client Requirements: {unique_requirements}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
     Applicable Regulations: {regulations}
     Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+    | Guidance | Assumes employee judgment | Some guidance with flexibility | Explicit, detailed direction |
+    | Content | Principles and guidelines | Key procedures with rationale | Comprehensive rules and workflows |
+
+    Apply the detail level ({detail_level}) to determine:
+    - How prescriptive vs principle-based the content should be
+    - The length and granularity of procedures
+    - The balance between "what" and "how"
+    - The level of specific examples and scenarios to include
 
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
@@ -263,11 +321,11 @@ generate_from_scratch:
     8. Build a cohesive policy by connecting to previously established concepts
     9. Apply industry-specific requirements and compliance needs for {industry}
     10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
-    11. IMPORTANT: Address the unique client requirements: {unique_requirements}
-    12. IMPORTANT: Detail level is "{detail_level}" - if "deep", provide comprehensive, detailed content with explanations; if "light", provide concise, high-level content
+    11. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    12. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    13. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
 
     CONTENT:
-
 
 generate_summary:
   template: |
@@ -285,7 +343,6 @@ generate_summary:
     4. Use clear, professional language
 
     SUMMARY:
-
 
 classify_query:
   template: |
@@ -314,7 +371,6 @@ classify_query:
     REASON: [brief explanation]
     SHOULD_PROCEED: [true/false]
 
-
 generate_toc_from_description:
   template: |
     You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
@@ -322,17 +378,41 @@ generate_toc_from_description:
     POLICY CONTEXT:
     - Title: {title}
     - Description: {description}
+    - Function: {function}
+    - Policy Type: {policy_type}
     - Industry: {industry}
     - Company: {company_name}
     - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, adjust the TOC structure:
+
+    | Detail Level | TOC Approach |
+    |--------------|--------------|
+    | Light (1-2) | Fewer main topics (3-5), focus on high-level principles and outcomes |
+    | Moderate (3) | Balanced structure (4-6 main topics), mix of principles and procedures |
+    | Heavy (4-5) | More comprehensive topics (6-8), detailed procedures and step-by-step guides |
+
+    Apply the detail level ({detail_level}) to determine:
+    - The number and granularity of topics and subtopics
+    - Whether to focus on principles (light) or procedures (heavy)
+    - The depth of breakdown needed for each section
 
     TASK:
     Generate a well-structured Table of Contents for this policy document. The TOC should:
     1. Be specific to the {industry} industry
-    2. Address the requirements mentioned in the description
+    2. Address the requirements mentioned in the description (if provided)
     3. Follow best practices for {country} regulations and standards
-    4. Include {max_topics} main topics maximum
-    5. Include up to {max_subtopics} subtopics per main topic
+    4. Consider the applicable regulations: {regulations}
+    5. Incorporate client-specific requests: {client_specific_requests}
+    6. Consider sector-specific comments: {sector_specific_comments}
+    7. Align with the detail level ({detail_level}) as outlined in the guidance above
+    8. Include {max_topics} main topics maximum
+    9. Include up to {max_subtopics} subtopics per main topic
 
     Consider:
     - Industry-specific compliance requirements
@@ -354,7 +434,6 @@ generate_toc_from_description:
     Return ONLY the JSON array, no additional text or explanation.
 
     JSON TOC:
-
 
 parse_toc_modification:
   template: |
@@ -448,7 +527,6 @@ parse_toc_modification:
 
     JSON RESPONSE:
 
-
 suggest_toc_topics:
   template: |
     You are an AI assistant helping to suggest relevant topics and subtopics for a policy document.
@@ -456,8 +534,23 @@ suggest_toc_topics:
     DOCUMENT CONTEXT:
     - Title: {draft_title}
     - Description: {draft_description}
+    - Function: {function}
+    - Policy Type: {policy_type}
     - Industry: {industry}
     - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    When suggesting topics, consider the detail level:
+
+    | Detail Level | Suggestion Approach |
+    |--------------|---------------------|
+    | Light (1-2) | Suggest high-level, principle-based topics focused on "why" and outcomes |
+    | Moderate (3) | Suggest balanced topics with mix of principles and key procedures |
+    | Heavy (4-5) | Suggest detailed, procedural topics with step-by-step guidance focus |
 
     CURRENT TABLE OF CONTENTS:
     {current_toc}
@@ -469,16 +562,21 @@ suggest_toc_topics:
     Based on the user's request and the document context, suggest relevant topics and/or subtopics that would enhance the policy document. Consider:
     1. Industry-specific requirements and regulations for {industry}
     2. Local compliance needs in {country}
-    3. Best practices and standards
-    4. Topics that complement the existing structure
-    5. The specific focus mentioned in the user's request
+    3. Applicable regulations: {regulations}
+    4. Client-specific requests: {client_specific_requests}
+    5. Sector-specific comments: {sector_specific_comments}
+    6. Detail level ({detail_level}) - suggest topics aligned with the appropriate level of detail
+    7. Best practices and standards
+    8. Topics that complement the existing structure
+    9. The specific focus mentioned in the user's request
 
     Provide suggestions that are:
     - Relevant to the document's purpose
     - Not duplicating existing topics
     - Specific and actionable
     - Appropriate for the {industry} industry
-    - Compliant with {country} regulations
+    - Compliant with {country} regulations and the specified regulations
+    - Aligned with the detail level (light vs heavy approach)
 
     Return your suggestions as a JSON object with the following structure:
     {{

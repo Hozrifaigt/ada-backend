@@ -791,14 +791,31 @@ class TOCManipulationService:
             # Format current TOC for the prompt
             toc_text = self._format_toc_for_prompt(current_toc)
 
+            # Map detail level to descriptive string
+            detail_level = draft_context.get('detail_level', 3)
+            detail_level_map = {
+                1: "Light (Principle-Based) - Focus on high-level principles and outcomes",
+                2: "Light-to-Moderate - Balanced approach with some flexibility",
+                3: "Moderate - Balance between principles and procedures",
+                4: "Moderate-to-Heavy - More detailed with clear procedures",
+                5: "Heavy (Prescriptive) - Detailed, step-by-step, compliance focused"
+            }
+            detail_level_str = detail_level_map.get(detail_level, detail_level_map[3])
+
             # Get the suggestion prompt
             prompt = self.prompt_manager.get_prompt(
                 "suggest_toc_topics",
                 draft_title=draft_context.get('title', 'Policy Document'),
                 draft_description=draft_context.get('description', ''),
+                function=draft_context.get('function', ''),
+                policy_type=draft_context.get('policy_type', ''),
                 industry=draft_context.get('industry', ''),
                 city=draft_context.get('city', ''),
                 country=draft_context.get('country', ''),
+                client_specific_requests=draft_context.get('client_specific_requests', ''),
+                sector_specific_comments=draft_context.get('sector_specific_comments', ''),
+                regulations=draft_context.get('regulations', ''),
+                detail_level=detail_level_str,
                 current_toc=toc_text,
                 user_query=user_query
             )

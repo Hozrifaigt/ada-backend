@@ -21,9 +21,15 @@ class TOCGenerationService:
 
     async def generate_toc_from_description(
         self,
-        description: str,
+        description: Optional[str],
         title: str,
         client_metadata: ClientMetadata,
+        function: str = "",
+        policy_type: str = "",
+        client_specific_requests: Optional[str] = None,
+        sector_specific_comments: Optional[str] = None,
+        regulations: str = "",
+        detail_level: int = 3,
         max_topics: int = 8,
         max_subtopics_per_topic: int = 5
     ) -> List[Dict[str, Any]]:
@@ -31,9 +37,13 @@ class TOCGenerationService:
         Generate a structured TOC based on policy description and client context.
 
         Args:
-            description: Policy description provided by user
+            description: Policy description provided by user (optional)
             title: Policy title
             client_metadata: Client information (industry, location, etc.)
+            client_specific_requests: Client-specific requirements (optional)
+            sector_specific_comments: Sector-specific considerations (optional)
+            regulations: Applicable regulations
+            detail_level: Level of detail (1-5)
             max_topics: Maximum number of main topics to generate
             max_subtopics_per_topic: Maximum subtopics per main topic
 
@@ -46,14 +56,30 @@ class TOCGenerationService:
             # Get the prompt template
             prompt_template = self.prompt_manager.get_prompt_template("generate_toc_from_description")
 
+            # Map detail level to descriptive string
+            detail_level_map = {
+                1: "Light (Principle-Based) - Focus on high-level principles and outcomes",
+                2: "Light-to-Moderate - Balanced approach with some flexibility",
+                3: "Moderate - Balance between principles and procedures",
+                4: "Moderate-to-Heavy - More detailed with clear procedures",
+                5: "Heavy (Prescriptive) - Detailed, step-by-step, compliance focused"
+            }
+            detail_level_str = detail_level_map.get(detail_level, detail_level_map[3])
+
             # Format the prompt with context
             formatted_prompt = prompt_template.format(
                 title=title,
-                description=description,
+                description=description or "",
+                function=function or "",
+                policy_type=policy_type or "",
                 industry=client_metadata.industry,
                 country=client_metadata.country,
                 city=client_metadata.city,
                 company_name=client_metadata.name,
+                client_specific_requests=client_specific_requests or "",
+                sector_specific_comments=sector_specific_comments or "",
+                regulations=regulations or "",
+                detail_level=detail_level_str,
                 max_topics=max_topics,
                 max_subtopics=max_subtopics_per_topic
             )

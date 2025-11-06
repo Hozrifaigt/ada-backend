@@ -8,17 +8,21 @@ from datetime import datetime
 class ClientMetadata(BaseModel):
     name: str
     country: str
+    city: str
     industry: str 
 
 
 class InitializeDraftRequest(BaseModel):
-    """Request to initialize a new draft from description."""
+    """Request to initialize a new draft from description or template."""
     title: str = Field(..., min_length=1, max_length=200, description="Draft title")
-    description: str = Field(..., min_length=1, max_length=2000, description="Policy description for RAG search")
+    description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
-    unique_requirements: Optional[str] = Field(None, max_length=5000, description="Unique client requirements")
-    regulations: List[str] = Field(default_factory=list, description="Applicable regulations (e.g., 'UAE Labor Law')")
-    detail_level: str = Field(default="light", description="Level of detail: 'light' or 'deep'")
+    function: str = Field(..., description="Function category (e.g., 'HR')")
+    policy_type: str = Field(..., description="Policy type (e.g., 'Remote Work Policy')")
+    client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
+    detail_level: int = Field(default=3, ge=1, le=5, description="Level of detail: 1 (light) to 5 (comprehensive)")
 
 
 class UpdateTOCRequest(BaseModel):
@@ -45,11 +49,14 @@ class UpdateContentRequest(BaseModel):
 class ValidateDraftRequest(BaseModel):
     """Request to validate draft creation parameters."""
     title: str = Field(..., min_length=1, max_length=200, description="Draft title")
-    description: str = Field(..., min_length=1, max_length=2000, description="Policy description to validate")
+    description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
-    unique_requirements: Optional[str] = Field(None, max_length=5000, description="Unique client requirements")
-    regulations: List[str] = Field(default_factory=list, description="Applicable regulations (e.g., 'UAE Labor Law')")
-    detail_level: str = Field(default="light", description="Level of detail: 'light' or 'deep'")
+    function: str = Field(..., description="Function category (e.g., 'HR')")
+    policy_type: str = Field(..., description="Policy type (e.g., 'Remote Work Policy')")
+    client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
+    detail_level: int = Field(default=3, ge=1, le=5, description="Level of detail: 1 (light) to 5 (comprehensive)")
 
 
 class ExportRequest(BaseModel):
@@ -80,7 +87,7 @@ class DraftSummary(BaseModel):
     """Summary information for a draft (used in list)."""
     draft_id: str
     title: str
-    description: str
+    description: Optional[str] = None
     created_by: str
     created_at: str
     modified_at: str
@@ -171,16 +178,19 @@ class Subtopic(BaseModel):
 class DraftMetadata(BaseModel):
     """Draft metadata."""
     title: str
-    description: str
+    description: Optional[str] = None
     created_by: str
     created_at: str
     modified_at: str
     client_metadata: ClientMetadata
+    function: str
+    policy_type: str
     most_similar_policy_id: Optional[str] = None
     toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
-    unique_requirements: Optional[str] = Field(None, description="Unique client requirements")
-    regulations: List[str] = Field(default_factory=list, description="Applicable regulations")
-    detail_level: str = Field(default="light", description="Level of detail: 'light' or 'deep'")
+    client_specific_requests: Optional[str] = Field(None, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation")
+    detail_level: int = Field(default=3, description="Level of detail: 1 (light) to 5 (comprehensive)")
 
 
 class CompleteDraft(BaseModel):

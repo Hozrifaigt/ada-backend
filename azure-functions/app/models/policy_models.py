@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 
 class SimilarPolicyRequest(BaseModel):
     """Request for finding similar policies - simplified as requested."""
-    description: str = Field(..., min_length=1, max_length=2000)
+    description: Optional[str] = Field(None, max_length=2000)
     threshold: float = Field(default=0.6, ge=0, le=1)
 
 class PolicyMatch(BaseModel):

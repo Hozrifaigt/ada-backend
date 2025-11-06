@@ -21,6 +21,26 @@ class ContentGenerationService:
         self.classification_service = create_classification_service()
         self.prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
 
+    def _map_detail_level(self, detail_level: int) -> str:
+        """
+        Map detail level int (1-5) to descriptive string for prompts.
+        Based on the Light (Principle-Based) vs Heavy (Prescriptive) policy framework.
+
+        Args:
+            detail_level: Integer from 1 to 5
+
+        Returns:
+            Descriptive string for prompt
+        """
+        mapping = {
+            1: "Light (Principle-Based) - Focus on high-level principles and outcomes",
+            2: "Light-to-Moderate - Balanced approach with some flexibility",
+            3: "Moderate - Balance between principles and procedures",
+            4: "Moderate-to-Heavy - More detailed with clear procedures",
+            5: "Heavy (Prescriptive) - Detailed, step-by-step, compliance focused"
+        }
+        return mapping.get(detail_level, mapping[3])  # Default to medium
+
     async def generate_topic_content(
         self,
         draft: CompleteDraft,
@@ -250,11 +270,14 @@ class ContentGenerationService:
         prompt = self.prompt_manager.get_prompt(
             "adapt_existing_content",
             document_title=draft.metadata.title,
-            document_description=draft.metadata.description,
+            document_description=draft.metadata.description or "",
+            function=draft.metadata.function,
+            policy_type=draft.metadata.policy_type,
             industry=draft.metadata.client_metadata.industry,
-            unique_requirements=draft.metadata.unique_requirements or "None specified",
-            regulations=", ".join(draft.metadata.regulations) if draft.metadata.regulations else "None specified",
-            detail_level=draft.metadata.detail_level,
+            client_specific_requests=draft.metadata.client_specific_requests or "",
+            sector_specific_comments=draft.metadata.sector_specific_comments or "",
+            regulations=draft.metadata.regulations or "",
+            detail_level=self._map_detail_level(draft.metadata.detail_level),
             full_table_of_contents=full_toc,
             previous_topics=self._format_context_for_prompt(sequential_context),
             existing_content=existing_content,
@@ -289,11 +312,14 @@ class ContentGenerationService:
         prompt = self.prompt_manager.get_prompt(
             "generate_with_references",
             document_title=draft_metadata.title,
-            document_description=draft_metadata.description,
+            document_description=draft_metadata.description or "",
+            function=draft_metadata.function,
+            policy_type=draft_metadata.policy_type,
             industry=draft_metadata.client_metadata.industry,
-            unique_requirements=draft_metadata.unique_requirements or "None specified",
-            regulations=", ".join(draft_metadata.regulations) if draft_metadata.regulations else "None specified",
-            detail_level=draft_metadata.detail_level,
+            client_specific_requests=draft_metadata.client_specific_requests or "",
+            sector_specific_comments=draft_metadata.sector_specific_comments or "",
+            regulations=draft_metadata.regulations or "",
+            detail_level=self._map_detail_level(draft_metadata.detail_level),
             full_table_of_contents=full_toc,
             topic_title=title,
             user_requirements=user_prompt,
@@ -321,11 +347,14 @@ class ContentGenerationService:
         prompt = self.prompt_manager.get_prompt(
             "generate_from_scratch",
             document_title=draft_metadata.title,
-            document_description=draft_metadata.description,
+            document_description=draft_metadata.description or "",
+            function=draft_metadata.function,
+            policy_type=draft_metadata.policy_type,
             industry=draft_metadata.client_metadata.industry,
-            unique_requirements=draft_metadata.unique_requirements or "None specified",
-            regulations=", ".join(draft_metadata.regulations) if draft_metadata.regulations else "None specified",
-            detail_level=draft_metadata.detail_level,
+            client_specific_requests=draft_metadata.client_specific_requests or "",
+            sector_specific_comments=draft_metadata.sector_specific_comments or "",
+            regulations=draft_metadata.regulations or "",
+            detail_level=self._map_detail_level(draft_metadata.detail_level),
             full_table_of_contents=full_toc,
             topic_title=title,
             user_requirements=user_prompt,

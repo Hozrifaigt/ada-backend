@@ -22,56 +22,88 @@ class DraftService:
     
     async def initialize_draft_from_description(
         self,
-        description: str,
+        description: Optional[str],
         title: str,
         user_id: str,
         similarity_service,
         store,
         client_metadata: ClientMetadata,
+        function: str,
+        policy_type: str,
+        template_storage=None,
         llm_service=None,
-        unique_requirements: Optional[str] = None,
-        regulations: List[str] = None,
-        detail_level: str = "light"
+        client_specific_requests: Optional[str] = None,
+        sector_specific_comments: Optional[str] = None,
+        regulations: str = "",
+        detail_level: int = 3
     ) -> Dict[str, Any]:
         """
-        Initialize a new draft from user description.
-        Returns draft with suggested TOC from similar policies or AI-generated TOC.
+        Initialize a new draft from template or user description.
+        Priority: 1) Template (if function+policy_type match), 2) Similarity search, 3) AI generation
         """
         try:
-            # Search for similar policies
-            request = SimilarPolicyRequest(
-                description=description,
-                threshold=0.7
-            )
-            similar_policies = await similarity_service.find_similar_policies(request, store)
-            most_similar_policy_id = similar_policies[0].policy_id if similar_policies else None
+            # First, try to find a matching template if function and policy_type are provided
+            template_toc = None
+            toc_source = "similarity_search"
 
-            # Log the results for debugging
-            logger.info(f"Similarity search results: {len(similar_policies)} policies found above {request.threshold} threshold")
-            if similar_policies:
-                logger.info(f"Most similar policy: {similar_policies[0].filename} with score {similar_policies[0].similarity_score:.2%}")
-            else:
-                logger.info("No similar policies found - will generate AI TOC")
+            if template_storage and function and policy_type:
+                logger.info(f"Looking for template: function='{function}', policy_type='{policy_type}'")
+                templates = template_storage.list_templates_by_function(function)
+
+                # Find template matching the policy type
+                matching_template = None
+                for template in templates:
+                    if template.policy_type.lower() == policy_type.lower():
+                        matching_template = template
+                        break
+
+                if matching_template:
+                    logger.info(f"Found matching template for {function} - {policy_type}")
+                    template_toc = matching_template.toc
+                    toc_source = "template"
+                else:
+                    logger.info(f"No template found for {function} - {policy_type}")
+
+            # If no template found and description provided, search for similar policies
+            similar_policies = []
+            most_similar_policy_id = None
+
+            if not template_toc and description and description.strip():
+                request = SimilarPolicyRequest(
+                    description=description,
+                    threshold=0.7
+                )
+                similar_policies = await similarity_service.find_similar_policies(request, store)
+                most_similar_policy_id = similar_policies[0].policy_id if similar_policies else None
+
+                # Log the results for debugging
+                logger.info(f"Similarity search results: {len(similar_policies)} policies found above {request.threshold} threshold")
+                if similar_policies:
+                    logger.info(f"Most similar policy: {similar_policies[0].filename} with score {similar_policies[0].similarity_score:.2%}")
+                else:
+                    logger.info("No similar policies found - will generate AI TOC")
+            elif not template_toc:
+                logger.info("No template or description provided - will generate AI TOC if LLM available")
 
             # Create draft structure
             draft_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
-
-            # Track TOC source for response
-            toc_source = "similarity_search"
 
             draft_metadata = DraftMetadata(
                 id=draft_id,
                 title=title,
                 client_metadata=client_metadata, # Pass the Pydantic object directly
                 description=description,
+                function=function,
+                policy_type=policy_type,
                 created_by=user_id,
                 created_at=now.isoformat(),
                 modified_at=now.isoformat(),
                 most_similar_policy_id=most_similar_policy_id,
                 toc_source=toc_source,  # Store the TOC source
-                unique_requirements=unique_requirements,
-                regulations=regulations or [],
+                client_specific_requests=client_specific_requests,
+                sector_specific_comments=sector_specific_comments,
+                regulations=regulations,
                 detail_level=detail_level
             )
 
@@ -81,13 +113,19 @@ class DraftService:
                 toc=[]
             )
 
-            if similar_policies:
+            # Priority 1: Use template TOC if found (from uploaded Excel)
+            if template_toc:
+                draft_to_save.toc = template_toc  # Use template TOC directly with content
+                logger.info(f"Using TOC from template for {function} - {policy_type} with {len(template_toc)} topics")
+            # Priority 2: Use similar policy TOC if found
+            elif similar_policies:
                 # Transform the TOC to properly set source_topic_id and source_subtopic_id
                 draft_to_save.toc = self._transform_toc_for_draft(similar_policies[0].toc)
                 logger.info(f"Using TOC from similar policy: {most_similar_policy_id}")
-            else:
+            # Priority 3: Generate AI TOC (only if description provided)
+            elif description and description.strip():
                 # No similar policies found - generate TOC using LLM
-                logger.info("No similar policies found. Generating TOC using AI...")
+                logger.info("No template or similar policies found. Generating TOC using AI...")
                 toc_source = "ai_generated"
                 draft_to_save.metadata.toc_source = toc_source  # Update metadata
 
@@ -99,7 +137,13 @@ class DraftService:
                     generated_toc = await toc_generator.generate_toc_from_description(
                         description=description,
                         title=title,
-                        client_metadata=client_metadata
+                        client_metadata=client_metadata,
+                        function=function,
+                        policy_type=policy_type,
+                        client_specific_requests=client_specific_requests,
+                        sector_specific_comments=sector_specific_comments,
+                        regulations=regulations,
+                        detail_level=detail_level
                     )
 
                     # Transform to draft format (mark as AI-generated)
@@ -109,6 +153,9 @@ class DraftService:
                     # Fallback to basic structure if no LLM service available
                     logger.warning("No LLM service available for TOC generation, using basic template")
                     draft_to_save.toc = self._get_basic_toc_template()
+            else:
+                # No template, no description - cannot create draft
+                raise Exception("Cannot create draft: No template found and no description provided")
 
             success = self.storage.create_draft(draft_to_save)
 
@@ -131,6 +178,95 @@ class DraftService:
 
         except Exception as e:
             logger.error(f"Failed to initialize draft: {e}")
+            return None
+
+    async def create_draft_from_template(
+        self,
+        template_storage,
+        template_id: str,
+        title: str,
+        user_id: str,
+        client_metadata: ClientMetadata,
+        client_specific_requests: Optional[str] = None,
+        regulations: str = "",
+        detail_level: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Create a new draft from a policy template.
+
+        Args:
+            template_storage: PolicyTemplateStorageService instance
+            template_id: Template ID to use
+            title: Draft title
+            user_id: User creating the draft
+            client_metadata: Client information
+            client_specific_requests: Optional client-specific requirements
+            regulations: Applicable regulations
+            detail_level: Level of detail (1-5)
+
+        Returns:
+            Dict with draft information
+        """
+        try:
+            # Get all templates to find the one with matching ID
+            all_templates = template_storage.list_all_templates()
+            template = None
+            for t in all_templates:
+                if t.template_id == template_id:
+                    template = t
+                    break
+
+            if not template:
+                logger.error(f"Template {template_id} not found")
+                return None
+
+            # Create draft structure
+            draft_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+
+            # Create draft metadata
+            draft_metadata = DraftMetadata(
+                id=draft_id,
+                title=title,
+                description=None,  # Templates don't have descriptions
+                client_metadata=client_metadata,
+                function=template.function,
+                policy_type=template.policy_type,
+                created_by=user_id,
+                created_at=now.isoformat(),
+                modified_at=now.isoformat(),
+                most_similar_policy_id=None,
+                toc_source="template",
+                client_specific_requests=client_specific_requests,
+                regulations=regulations,
+                detail_level=detail_level
+            )
+
+            # Copy TOC from template (content is already filled in)
+            draft_to_save = CompleteDraft(
+                id=str(uuid.uuid4()),
+                metadata=draft_metadata,
+                toc=template.toc  # Template already has TOCTopic objects with content
+            )
+
+            # Save to storage
+            success = self.storage.create_draft(draft_to_save)
+
+            if success:
+                logger.info(f"Created draft {draft_to_save.id} from template {template_id}")
+                draft_dict = draft_to_save.model_dump()
+
+                return {
+                    "draft_id": draft_to_save.id,
+                    "draft": draft_dict,
+                    "toc_source": "template"
+                }
+            else:
+                logger.error(f"Failed to save draft from template {template_id}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to create draft from template: {e}")
             return None
 
     def _transform_toc_for_draft(self, toc_from_policy: List[Dict[str, Any]]) -> List:

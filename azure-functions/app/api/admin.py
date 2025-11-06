@@ -2,11 +2,16 @@ import logging
 
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, Header, status, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Header, status, BackgroundTasks, Depends
 
+from fastapi import File, UploadFile
 from app.config.settings import settings
+from app.auth.entra_service import get_current_user
 from app.pipelines.components.index_manager import AzureSearchIndexManager
 from app.pipelines.pipeline_trigger import run_indexing_pipeline
+from app.services.excel_parser_service import ExcelParserService
+from app.services.policy_template_storage import PolicyTemplateStorageService
+from app.models.policy_template_models import UploadPolicyTemplatesResponse
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +26,7 @@ class IndexStatsResponse(BaseModel):
     semantic_search_enabled: bool
     fields: list
 
-router = APIRouter()
+router = APIRouter(prefix="/admin")
 
 def _validate_admin_api_key(api_key: Optional[str]) -> bool:
     """Validate admin API key from header."""
@@ -277,4 +282,119 @@ async def process_and_index_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start processing: {str(e)}"
+        )
+
+@router.post("/upload-policy-templates", response_model=UploadPolicyTemplatesResponse)
+async def upload_policy_templates(
+    file: UploadFile = File(...),
+    x_admin_api_key: Optional[str] = Header(None),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Upload policy templates from Excel file.
+
+    Expected Excel format:
+    - Columns: Function, Policies, Topics, Topic Content, Subtopics, Subtopic Content
+    - Empty cells mean "same as above" (merged cell pattern)
+    """
+    # Check if user is admin (for now, hardcoded email)
+    admin_emails = ["hozayfa.rifai@ae.gt.com"]
+    user_email = current_user.get("email", "").lower()
+
+    if user_email not in admin_emails:
+        logger.warning(f"SECURITY: Non-admin user {user_email} attempted to upload templates")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this resource"
+        )
+
+    # Validate file type
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an Excel file (.xlsx or .xls)"
+        )
+
+    try:
+        # Read file content
+        file_content = await file.read()
+
+        # Parse Excel
+        parser = ExcelParserService()
+        templates, errors = await parser.parse_excel(file_content)
+
+        if errors and not templates:
+            return UploadPolicyTemplatesResponse(
+                success=False,
+                templates_imported=0,
+                functions=[],
+                policy_types=[],
+                message="Failed to parse Excel file",
+                errors=errors
+            )
+
+        # Store templates
+        storage = PolicyTemplateStorageService(
+            connection_string=settings.AZURE_TABLE_STORAGE_CONNECTION_STRING,
+            table_name=settings.AZURE_TABLE_NAME
+        )
+
+        imported_count = 0
+        functions = set()
+        policy_types = set()
+
+        for template in templates:
+            if storage.create_template(template):
+                imported_count += 1
+                functions.add(template.function)
+                policy_types.add(template.policy_type)
+
+        logger.info(f"Successfully imported {imported_count}/{len(templates)} policy templates")
+
+        return UploadPolicyTemplatesResponse(
+            success=True,
+            templates_imported=imported_count,
+            functions=list(functions),
+            policy_types=list(policy_types),
+            message=f"Successfully imported {imported_count} policy templates",
+            errors=errors if errors else []
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to upload policy templates: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload templates: {str(e)}"
+        )
+
+@router.delete("/policy-templates", response_model=AdminResponse)
+def delete_all_policy_templates(x_admin_api_key: Optional[str] = Header(None)):
+    """Delete all policy templates from storage."""
+    if not _validate_admin_api_key(x_admin_api_key):
+        logger.warning("SECURITY: Invalid or missing X-Admin-API-Key for template deletion")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Admin-API-Key header"
+        )
+
+    try:
+        storage = PolicyTemplateStorageService(
+            connection_string=settings.AZURE_TABLE_STORAGE_CONNECTION_STRING,
+            table_name=settings.AZURE_TABLE_NAME
+        )
+
+        deleted_count = storage.delete_all_templates()
+
+        logger.info(f"Deleted {deleted_count} policy templates")
+
+        return AdminResponse(
+            message=f"Successfully deleted {deleted_count} policy templates",
+            details={"deleted_count": deleted_count}
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to delete policy templates: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete templates: {str(e)}"
         )

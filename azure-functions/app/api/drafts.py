@@ -10,6 +10,7 @@ from app.pipelines.components.llm import AzureLLM
 
 from app.services.draft_service import DraftService
 from app.services.draft_storage import DraftStorageService
+from app.services.policy_template_storage import PolicyTemplateStorageService
 
 from app.api.policy.dependencies import get_llm, get_vector_store as get_store
 from app.api.policy.search.similarity_service import SimilarityService
@@ -35,6 +36,10 @@ from app.models.toc_chat_models import (
     TOCConfirmRequest,
     TOCConfirmResponse,
     TOCOperation
+)
+from app.models.policy_template_models import (
+    GetPolicyTypesResponse,
+    CreateDraftFromTemplateRequest
 )
 
 
@@ -117,15 +122,21 @@ async def initialize_draft(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Initialize a new draft from description.
-    Searches for similar policies and suggests TOC.
+    Initialize a new draft from template or description.
+    If policy_type is provided, uses template. Otherwise, searches for similar policies.
     """
     logger.info(f"Draft initialization requested by user: {current_user.get('email')}")
-    
+
     try:
         # Extract clean name (split on dash and take first part)
         raw_name = current_user.get('name', current_user.get('email'))
         clean_name = raw_name.split('-')[0].strip() if raw_name and '-' in raw_name else raw_name
+
+        # Initialize template storage
+        template_storage = PolicyTemplateStorageService(
+            connection_string=settings.AZURE_TABLE_STORAGE_CONNECTION_STRING,
+            table_name=settings.AZURE_TABLE_NAME
+        )
 
         result = await draft_service.initialize_draft_from_description(
             description=request.description,
@@ -134,12 +145,16 @@ async def initialize_draft(
             similarity_service=similarity_service,
             store=store,
             client_metadata=request.client_metadata,
+            function=request.function,
+            policy_type=request.policy_type,
+            template_storage=template_storage,  # Pass template storage
             llm_service=get_llm(),  # Pass LLM service for TOC generation
-            unique_requirements=request.unique_requirements,
+            client_specific_requests=request.client_specific_requests,
+            sector_specific_comments=request.sector_specific_comments,
             regulations=request.regulations,
             detail_level=request.detail_level
         )
-        
+
         if result:
             return InitializeDraftResponse(
                 draft_id=result["draft_id"],
@@ -153,7 +168,7 @@ async def initialize_draft(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to initialize draft"
             )
-            
+
     except Exception as e:
         logger.error(f"Failed to initialize draft: {e}")
         raise HTTPException(
@@ -187,6 +202,75 @@ async def list_drafts(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve drafts"
         )
+
+
+@router.get("/functions", response_model=GetPolicyTypesResponse)
+async def get_functions(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get list of all available functions.
+    """
+    logger.info(f"Getting all functions by user: {current_user.get('email')}")
+
+    try:
+        storage = PolicyTemplateStorageService(
+            connection_string=settings.AZURE_TABLE_STORAGE_CONNECTION_STRING,
+            table_name=settings.AZURE_TABLE_NAME
+        )
+
+        functions = storage.get_all_functions()
+
+        logger.info(f"Found {len(functions)} functions")
+
+        return GetPolicyTypesResponse(
+            policy_types=functions,
+            total=len(functions)
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get functions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve functions: {str(e)}"
+        )
+
+
+@router.get("/policy-templates", response_model=GetPolicyTypesResponse)
+async def get_policy_types(
+    function: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get list of available policy types for a specific function.
+
+    Args:
+        function: Function category (e.g., 'HR', 'IT', 'Legal')
+    """
+    logger.info(f"Getting policy types for function '{function}' by user: {current_user.get('email')}")
+
+    try:
+        storage = PolicyTemplateStorageService(
+            connection_string=settings.AZURE_TABLE_STORAGE_CONNECTION_STRING,
+            table_name=settings.AZURE_TABLE_NAME
+        )
+
+        policy_types = storage.get_policy_types_by_function(function)
+
+        logger.info(f"Found {len(policy_types)} policy types for function '{function}'")
+
+        return GetPolicyTypesResponse(
+            policy_types=policy_types,
+            total=len(policy_types)
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get policy types for function '{function}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve policy types: {str(e)}"
+        )
+
 
 @router.get("/{draft_id}")
 async def get_draft(
@@ -624,10 +708,16 @@ async def chat_modify_toc(
         draft_context = {
             'title': metadata.get('title', ''),
             'description': metadata.get('description', ''),
+            'function': metadata.get('function', ''),
+            'policy_type': metadata.get('policy_type', ''),
             'industry': client_metadata.get('industry', ''),
             'company_name': client_metadata.get('name', ''),
             'city': client_metadata.get('city', ''),
-            'country': client_metadata.get('country', '')
+            'country': client_metadata.get('country', ''),
+            'client_specific_requests': metadata.get('client_specific_requests', ''),
+            'sector_specific_comments': metadata.get('sector_specific_comments', ''),
+            'regulations': metadata.get('regulations', ''),
+            'detail_level': metadata.get('detail_level', 3)
         }
 
         # Parse the command
@@ -863,4 +953,69 @@ async def confirm_toc_modification(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to apply TOC modification: {str(e)}"
+        )
+
+
+@router.post("/from-template", response_model=InitializeDraftResponse)
+async def create_draft_from_template(
+    request: CreateDraftFromTemplateRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Create a new draft from a policy template.
+
+    This copies the template's TOC structure and pre-filled content,
+    then applies client-specific metadata.
+    """
+    logger.info(f"Creating draft from template {request.template_id} by user: {current_user.get('email')}")
+
+    try:
+        # Extract clean name
+        raw_name = current_user.get('name', current_user.get('email'))
+        clean_name = raw_name.split('-')[0].strip() if raw_name and '-' in raw_name else raw_name
+
+        # Get template
+        storage = PolicyTemplateStorageService(
+            connection_string=settings.AZURE_TABLE_STORAGE_CONNECTION_STRING,
+            table_name=settings.AZURE_TABLE_NAME
+        )
+
+        # Parse client_metadata dict to ClientMetadata object
+        from app.models.draft_models import ClientMetadata
+        client_metadata = ClientMetadata(**request.client_metadata)
+
+        # Create draft from template
+        result = await draft_service.create_draft_from_template(
+            template_storage=storage,
+            template_id=request.template_id,
+            title=request.title,
+            user_id=clean_name,
+            client_metadata=client_metadata,
+            client_specific_requests=request.client_specific_requests,
+            regulations=request.regulations,
+            detail_level=request.detail_level
+        )
+
+        if result:
+            return InitializeDraftResponse(
+                draft_id=result["draft_id"],
+                similar_policies_found=0,  # Not applicable for templates
+                suggested_toc=result["draft"]["toc"],
+                message="Draft created successfully from template",
+                toc_source="template"
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create draft from template"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create draft from template: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create draft from template: {str(e)}"
         )
