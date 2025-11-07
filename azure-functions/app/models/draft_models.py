@@ -30,6 +30,19 @@ class UpdateTOCRequest(BaseModel):
     toc: List[Dict[str, Any]] = Field(..., description="Table of contents structure")
 
 
+class UpdateDraftMetadataRequest(BaseModel):
+    """Request to update draft metadata."""
+    title: str = Field(..., min_length=1, max_length=200, description="Draft title")
+    description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
+    client_metadata: ClientMetadata = Field(..., description="Client metadata")
+    function: str = Field(..., description="Function category (e.g., 'HR')")
+    policy_type: str = Field(..., description="Policy type (e.g., 'Remote Work Policy')")
+    client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
+    detail_level: int = Field(default=3, ge=1, le=5, description="Level of detail: 1 (light) to 5 (comprehensive)")
+
+
 class GenerateContentRequest(BaseModel):
     """Request to generate content for a topic/subtopic."""
     user_prompt: str = Field(..., min_length=1, max_length=5000, description="User requirements for content generation")

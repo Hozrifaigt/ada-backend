@@ -21,6 +21,7 @@ from app.models.draft_models import (
     ValidateDraftRequest,
     ValidateDraftResponse,
     UpdateTOCRequest,
+    UpdateDraftMetadataRequest,
     GenerateContentRequest,
     UpdateContentRequest,
     ExportRequest,
@@ -346,6 +347,37 @@ async def update_toc(
             detail="Failed to update TOC"
         )
 
+@router.put("/{draft_id}/metadata")
+async def update_draft_metadata(
+    draft_id: str,
+    request: UpdateDraftMetadataRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Update draft metadata."""
+    logger.info(f"Metadata update for draft {draft_id} by user: {current_user.get('email')}")
+
+    try:
+        success = draft_service.update_draft_metadata(draft_id, request)
+
+        if success:
+            return {"message": "Draft metadata updated successfully"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Draft {draft_id} not found or update failed"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update metadata: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update draft metadata"
+        )
+
+
 @router.delete("/{draft_id}")
 async def delete_draft(
     draft_id: str,
@@ -354,10 +386,10 @@ async def delete_draft(
 ):
     """Delete a draft from storage."""
     logger.info(f"Draft deletion for {draft_id} by user: {current_user.get('email')}")
-    
+
     try:
         success = draft_service.delete_draft(draft_id)
-        
+
         if success:
             return {"message": "Draft deleted successfully"}
         else:

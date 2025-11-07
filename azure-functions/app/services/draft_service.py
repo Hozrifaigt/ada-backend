@@ -848,6 +848,46 @@ class DraftService:
 
         return context_parts
     
+    def update_draft_metadata(self, draft_id: str, metadata_request) -> bool:
+        """
+        Update draft metadata (title, description, client info, etc.).
+        """
+        try:
+            # Get the existing draft
+            draft_model = self.storage.get_draft(draft_id)
+            if not draft_model:
+                logger.error(f"Draft {draft_id} not found")
+                return False
+
+            # Update metadata fields
+            draft_model.metadata.title = metadata_request.title
+            draft_model.metadata.description = metadata_request.description
+            draft_model.metadata.client_metadata = metadata_request.client_metadata
+            draft_model.metadata.function = metadata_request.function
+            draft_model.metadata.policy_type = metadata_request.policy_type
+            draft_model.metadata.client_specific_requests = metadata_request.client_specific_requests
+            draft_model.metadata.sector_specific_comments = metadata_request.sector_specific_comments
+            draft_model.metadata.regulations = metadata_request.regulations
+            draft_model.metadata.detail_level = metadata_request.detail_level
+
+            # Update modified timestamp
+            from datetime import datetime, timezone
+            draft_model.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+
+            # Save the updated draft
+            success = self.storage.update_draft(draft_id, draft_model)
+
+            if success:
+                logger.info(f"Successfully updated metadata for draft {draft_id}")
+            else:
+                logger.error(f"Failed to update metadata for draft {draft_id}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error updating draft metadata: {e}")
+            return False
+
     def delete_draft(self, draft_id: str) -> bool:
         """Delete a draft from storage."""
         try:
