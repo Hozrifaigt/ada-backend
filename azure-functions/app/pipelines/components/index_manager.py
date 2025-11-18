@@ -212,10 +212,98 @@ class AzureSearchIndexManager:
         """Delete and recreate the specified index."""
         target_index = index_name or self.index_name
         logger.warning(f"Recreating index '{target_index}' - ALL DATA WILL BE LOST")
-        
+
         if self.delete_index(target_index):
             logger.info("Index deleted, creating new simplified index...")
             return self.create_rag_index(target_index)
         else:
             logger.error("Failed to delete index, cannot recreate")
+            return False
+
+    def create_regulations_index(self, index_name: Optional[str] = None) -> bool:
+        """Create a dedicated index for regulations only."""
+        target_index = index_name or settings.AZURE_SEARCH_REGULATIONS_INDEX_NAME
+        try:
+            logger.info(f"Creating regulations-only index: {target_index}")
+
+            fields = [
+                # Common fields
+                SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
+                SimpleField(name="record_type", type=SearchFieldDataType.String, filterable=True, facetable=True),
+
+                # Regulation-specific fields
+                SearchableField(name="content", type=SearchFieldDataType.String, searchable=True, analyzer_name="en.microsoft"),
+                SearchField(
+                    name="content_vector",
+                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+                    searchable=True,
+                    vector_search_dimensions=settings.AZURE_OPENAI_EMBEDDING_DIMENSIONS,
+                    vector_search_profile_name="regulations-vector-profile"
+                ),
+                SearchableField(name="regulation_category", type=SearchFieldDataType.String, searchable=True, filterable=True, facetable=True),
+                SearchableField(name="decree_name", type=SearchFieldDataType.String, searchable=True, filterable=True),
+                SearchableField(name="article_number", type=SearchFieldDataType.String, searchable=True, filterable=True),
+                SearchableField(name="chapter", type=SearchFieldDataType.String, searchable=True),
+                SimpleField(name="regulation_type", type=SearchFieldDataType.String, filterable=True, facetable=True),
+                SimpleField(name="effective_date", type=SearchFieldDataType.String, filterable=True, sortable=True),
+                SimpleField(name="superseded_by", type=SearchFieldDataType.String, filterable=True),
+                SearchField(name="topics", type=SearchFieldDataType.Collection(SearchFieldDataType.String), searchable=True, filterable=True, facetable=True),
+                SearchField(name="references", type=SearchFieldDataType.Collection(SearchFieldDataType.String), searchable=True)
+            ]
+
+            # Vector search configuration for regulations
+            vector_search = VectorSearch(
+                algorithms=[
+                    HnswAlgorithmConfiguration(
+                        name="regulations-hnsw-algorithm",
+                        parameters={
+                            "m": 4,
+                            "efConstruction": 400,
+                            "efSearch": 500,
+                            "metric": "cosine"
+                        }
+                    )
+                ],
+                profiles=[
+                    VectorSearchProfile(
+                        name="regulations-vector-profile",
+                        algorithm_configuration_name="regulations-hnsw-algorithm"
+                    )
+                ]
+            )
+
+            # Semantic search configuration for regulations
+            semantic_config = SemanticConfiguration(
+                name="regulations-semantic-config",
+                prioritized_fields=SemanticPrioritizedFields(
+                    title_field=SemanticField(field_name="decree_name"),
+                    content_fields=[
+                        SemanticField(field_name="content")
+                    ],
+                    keywords_fields=[
+                        SemanticField(field_name="regulation_category"),
+                        SemanticField(field_name="article_number"),
+                        SemanticField(field_name="chapter")
+                    ]
+                )
+            )
+
+            semantic_search = SemanticSearch(configurations=[semantic_config])
+
+            # Create the index
+            index = SearchIndex(
+                name=target_index,
+                fields=fields,
+                vector_search=vector_search,
+                semantic_search=semantic_search
+            )
+
+            result = self.index_client.create_index(index)
+            logger.info(f"Successfully created regulations index: {result.name}")
+            logger.info("Vector search and semantic search enabled for regulation content")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to create regulations index '{target_index}': {e}")
             return False

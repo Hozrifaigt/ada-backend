@@ -169,6 +169,16 @@ adapt_existing_content:
     PREVIOUS TOPICS SUMMARY:
     {previous_topics}
 
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    CRITICAL INSTRUCTIONS FOR REGULATION CITATIONS:
+    1. When referencing regulations, use INLINE CITATIONS with article numbers (e.g., "According to Article 15 of Federal Decree-Law No. 33 of 2021, ...")
+    2. ONLY cite regulations provided in the RELEVANT REGULATION SECTIONS above - do not make up article numbers
+    3. If multiple articles apply, cite all relevant ones
+    4. Ensure accuracy - article numbers must match the provided sections exactly
+    5. If no relevant regulation sections are found above, proceed with industry best practices without regulation citations
+
     EXISTING CONTENT TO ADAPT:
     {existing_content}
 
@@ -188,9 +198,10 @@ adapt_existing_content:
     7. Build upon concepts introduced in completed topics without repeating them
     8. Include industry-specific regulations and standards relevant to {industry}
     9. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
-    10. IMPORTANT: Address the client-specific requests: {client_specific_requests}
-    11. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
-    12. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+    10. IMPORTANT: When regulation sections are provided, cite them using inline citations as specified above
+    11. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    12. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    13. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
 
     ADAPTED CONTENT:
 
@@ -242,6 +253,16 @@ generate_with_references:
     SIMILAR TOPICS FROM KNOWLEDGE BASE:
     {similar_topics}
 
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    CRITICAL INSTRUCTIONS FOR REGULATION CITATIONS:
+    1. When referencing regulations, use INLINE CITATIONS with article numbers (e.g., "According to Article 15 of Federal Decree-Law No. 33 of 2021, ...")
+    2. ONLY cite regulations provided in the RELEVANT REGULATION SECTIONS above - do not make up article numbers
+    3. If multiple articles apply, cite all relevant ones
+    4. Ensure accuracy - article numbers must match the provided sections exactly
+    5. If no relevant regulation sections are found above, proceed with industry best practices without regulation citations
+
     CONVERSATION HISTORY:
     {conversation_history}
 
@@ -256,9 +277,10 @@ generate_with_references:
     8. Reference or build upon completed topics when relevant without repeating their content
     9. Consider industry-specific regulations, standards, and best practices for {industry}
     10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
-    11. IMPORTANT: Address the client-specific requests: {client_specific_requests}
-    12. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
-    13. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+    11. IMPORTANT: When regulation sections are provided, cite them using inline citations as specified above
+    12. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    13. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    14. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
 
     CONTENT:
 
@@ -307,6 +329,16 @@ generate_from_scratch:
     PREVIOUS TOPICS SUMMARY:
     {previous_topics}
 
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    CRITICAL INSTRUCTIONS FOR REGULATION CITATIONS:
+    1. When referencing regulations, use INLINE CITATIONS with article numbers (e.g., "According to Article 15 of Federal Decree-Law No. 33 of 2021, ...")
+    2. ONLY cite regulations provided in the RELEVANT REGULATION SECTIONS above - do not make up article numbers
+    3. If multiple articles apply, cite all relevant ones
+    4. Ensure accuracy - article numbers must match the provided sections exactly
+    5. If no relevant regulation sections are found above, proceed with industry best practices without regulation citations
+
     CONVERSATION HISTORY:
     {conversation_history}
 
@@ -321,9 +353,10 @@ generate_from_scratch:
     8. Build a cohesive policy by connecting to previously established concepts
     9. Apply industry-specific requirements and compliance needs for {industry}
     10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
-    11. IMPORTANT: Address the client-specific requests: {client_specific_requests}
-    12. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
-    13. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+    11. IMPORTANT: When regulation sections are provided, cite them using inline citations as specified above
+    12. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    13. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    14. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
 
     CONTENT:
 

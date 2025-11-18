@@ -5,11 +5,14 @@ import sys
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
-from app.api import user, processing, admin, auth, drafts, debug
+from app.api import user, processing, admin, auth, drafts, debug, regulations
 from app.api.policy import router as policy_router
 from app.config.logging_config import setup_logging
 from app.config.settings import settings
+from app.middleware import limiter, rate_limit_exceeded_handler
 
 if os.environ.get('DEBUG_MODE') == 'true':
     import debugpy
@@ -32,6 +35,12 @@ app = FastAPI(
     description="An AI-powered system for drafting policies based on client profiles and existing documents.",
     version="1.0.0",
 )
+
+# Add rate limiter state to app
+app.state.limiter = limiter
+
+# Add rate limit exception handler
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Configure CORS - support both local development and Azure deployment
 allowed_origins = settings.ALLOWED_ORIGINS.split(",") if "," in settings.ALLOWED_ORIGINS else [settings.ALLOWED_ORIGINS]
@@ -88,6 +97,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 app.include_router(auth.router, prefix="/api/v1", tags=["Authentication"])
 app.include_router(policy_router, prefix="/api/v1", tags=["Policy Drafting"])
 app.include_router(drafts.router, prefix="/api/v1", tags=["Draft Management"])
+app.include_router(regulations.router, tags=["Regulations Management"])
 app.include_router(user.router, prefix="/api/v1", tags=["User Management"])
 app.include_router(processing.router, prefix="/api/v1", tags=["Pipeline Trigger"])
 app.include_router(admin.router, prefix="/api/v1", tags=["Administration"])

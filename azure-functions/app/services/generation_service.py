@@ -7,6 +7,7 @@ from app.prompts.manager import PromptManager
 from app.services.query_classification_service import QueryClassificationService, create_classification_service
 from app.models.classification_models import QueryCategory
 from app.models.draft_models import CompleteDraft, DraftMetadata
+from app.models.regulation_models import RegulationChunk
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,14 @@ class ContentGenerationService:
             # Step 7: Search for similar topics (for custom topics without source_id)
             similar_topics = await self._search_similar_topics(topic_title, vector_store, threshold=0.7)
 
+            # Step 7.5: Search for relevant regulations
+            regulation_chunks = await self._search_relevant_regulations(
+                topic_title=topic_title,
+                user_prompt=user_prompt,
+                draft_metadata=draft.metadata,
+                vector_store=vector_store
+            )
+
             # Step 8: Build complete context
             sequential_context = self._build_sequential_context(
                 draft,
@@ -157,7 +166,8 @@ class ContentGenerationService:
                     draft_metadata=draft.metadata,
                     conversation_history=formatted_generation_history,
                     llm_service=llm_service,
-                    full_toc=full_toc
+                    full_toc=full_toc,
+                    regulation_chunks=regulation_chunks
                 )
                 source_ids = [topic.get("id", topic.get("topic_id", "unknown")) for topic in similar_topics[:3]]
             else:
@@ -169,7 +179,8 @@ class ContentGenerationService:
                     draft_metadata=draft.metadata,
                     conversation_history=formatted_generation_history,
                     llm_service=llm_service,
-                    full_toc=full_toc
+                    full_toc=full_toc,
+                    regulation_chunks=regulation_chunks
                 )
                 source_ids = []
 
@@ -247,6 +258,97 @@ class ContentGenerationService:
             logger.error(f"Failed to search similar topics: {e}")
             return []
 
+    async def _search_relevant_regulations(
+        self,
+        topic_title: str,
+        user_prompt: str,
+        draft_metadata: DraftMetadata,
+        vector_store
+    ) -> List[RegulationChunk]:
+        """
+        Search for relevant regulation chunks based on topic and context.
+
+        Args:
+            topic_title: Title of the current topic
+            user_prompt: User's request/query
+            draft_metadata: Draft metadata with regulations field
+            vector_store: Vector store instance
+
+        Returns:
+            List of relevant RegulationChunk objects
+        """
+        # Only search if regulations field is set
+        if not draft_metadata.regulations or draft_metadata.regulations.strip() == "":
+            logger.info("No regulations specified, skipping regulation search")
+            return []
+
+        try:
+            # Build search query from topic title and user prompt
+            query_text = f"{topic_title} {user_prompt}"
+
+            # Build context for better search
+            context = {
+                "industry": draft_metadata.client_metadata.industry,
+                "policy_type": draft_metadata.policy_type,
+                "function": draft_metadata.function,
+                "client_requests": draft_metadata.client_specific_requests or "",
+                "sector_comments": draft_metadata.sector_specific_comments or ""
+            }
+
+            logger.info(f"Searching regulations for: {draft_metadata.regulations}")
+
+            # Search regulations
+            regulation_chunks = await vector_store.search_relevant_regulations(
+                query_text=query_text,
+                regulation_name=draft_metadata.regulations,
+                top_k=7,
+                min_score=0.75,
+                context=context
+            )
+
+            # If no results found with strict threshold, try with relaxed threshold
+            if not regulation_chunks:
+                logger.info("No regulations found with score >= 0.75, trying with relaxed threshold")
+                regulation_chunks = await vector_store.search_relevant_regulations(
+                    query_text=query_text,
+                    regulation_name=draft_metadata.regulations,
+                    top_k=5,
+                    min_score=0.65,
+                    context=context
+                )
+
+            logger.info(f"Found {len(regulation_chunks)} relevant regulation chunks")
+            return regulation_chunks
+
+        except Exception as e:
+            logger.error(f"Failed to search regulations: {e}")
+            return []
+
+    def _format_regulations_for_prompt(self, regulation_chunks: List[RegulationChunk]) -> str:
+        """
+        Format regulation chunks for inclusion in the prompt.
+
+        Args:
+            regulation_chunks: List of RegulationChunk objects
+
+        Returns:
+            Formatted string for prompt
+        """
+        if not regulation_chunks:
+            return ""
+
+        formatted_parts = []
+        for i, chunk in enumerate(regulation_chunks):
+            article_info = f"{chunk.article_number}" if chunk.article_number else "Section"
+            decree_name = chunk.decree_name
+            content = chunk.content
+
+            formatted_parts.append(
+                f"[Regulation {i+1}] {article_info} - {decree_name}\n{content}"
+            )
+
+        return "\n\n".join(formatted_parts)
+
     async def _adapt_existing_content(
         self,
         existing_content: str,
@@ -298,7 +400,8 @@ class ContentGenerationService:
         draft_metadata: DraftMetadata,
         conversation_history: str,
         llm_service,
-        full_toc: str
+        full_toc: str,
+        regulation_chunks: List[RegulationChunk] = None
     ) -> str:
         """Generate content using similar topics as reference."""
 
@@ -307,6 +410,9 @@ class ContentGenerationService:
             f"Reference {i+1} - {topic['title']}:\n{topic['content']}"
             for i, topic in enumerate(similar_topics[:3])
         ])
+
+        # Format regulations for prompt
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
 
         # Use prompt manager
         prompt = self.prompt_manager.get_prompt(
@@ -319,6 +425,7 @@ class ContentGenerationService:
             client_specific_requests=draft_metadata.client_specific_requests or "",
             sector_specific_comments=draft_metadata.sector_specific_comments or "",
             regulations=draft_metadata.regulations or "",
+            regulations_context=regulations_context,
             detail_level=self._map_detail_level(draft_metadata.detail_level),
             full_table_of_contents=full_toc,
             topic_title=title,
@@ -340,9 +447,13 @@ class ContentGenerationService:
         draft_metadata: DraftMetadata,
         conversation_history: str,
         llm_service,
-        full_toc: str
+        full_toc: str,
+        regulation_chunks: List[RegulationChunk] = None
     ) -> str:
         """Generate content from scratch when no references are available."""
+
+        # Format regulations for prompt
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
 
         prompt = self.prompt_manager.get_prompt(
             "generate_from_scratch",
@@ -354,6 +465,7 @@ class ContentGenerationService:
             client_specific_requests=draft_metadata.client_specific_requests or "",
             sector_specific_comments=draft_metadata.sector_specific_comments or "",
             regulations=draft_metadata.regulations or "",
+            regulations_context=regulations_context,
             detail_level=self._map_detail_level(draft_metadata.detail_level),
             full_table_of_contents=full_toc,
             topic_title=title,

@@ -42,12 +42,17 @@ class DraftService:
         Priority: 1) Template (if function+policy_type match), 2) Similarity search, 3) AI generation
         """
         try:
-            # First, try to find a matching template if function and policy_type are provided
+            # Determine if we have a description
+            has_description = description and description.strip()
+
+            # First, try to find a matching template ONLY if NO description provided
+            # Logic: If description provided → user wants custom policy (no template allowed)
+            #        If no description → can use template OR AI
             template_toc = None
             toc_source = "similarity_search"
 
-            if template_storage and function and policy_type:
-                logger.info(f"Looking for template: function='{function}', policy_type='{policy_type}'")
+            if template_storage and function and policy_type and not has_description:
+                logger.info(f"No description provided - looking for template: function='{function}', policy_type='{policy_type}'")
                 templates = template_storage.list_templates_by_function(function)
 
                 # Find template matching the policy type
@@ -63,12 +68,14 @@ class DraftService:
                     toc_source = "template"
                 else:
                     logger.info(f"No template found for {function} - {policy_type}")
+            elif has_description:
+                logger.info("Description provided - skipping template search (will use similarity search or AI)")
 
             # If no template found and description provided, search for similar policies
             similar_policies = []
             most_similar_policy_id = None
 
-            if not template_toc and description and description.strip():
+            if not template_toc and has_description:
                 request = SimilarPolicyRequest(
                     description=description,
                     threshold=0.7
@@ -122,10 +129,14 @@ class DraftService:
                 # Transform the TOC to properly set source_topic_id and source_subtopic_id
                 draft_to_save.toc = self._transform_toc_for_draft(similar_policies[0].toc)
                 logger.info(f"Using TOC from similar policy: {most_similar_policy_id}")
-            # Priority 3: Generate AI TOC (only if description provided)
-            elif description and description.strip():
-                # No similar policies found - generate TOC using LLM
-                logger.info("No template or similar policies found. Generating TOC using AI...")
+            # Priority 3: Generate AI TOC or use basic template (works with or without description)
+            elif not template_toc and not similar_policies:
+                # No template or similar policies found - generate TOC using AI or basic template
+                if has_description:
+                    logger.info("No template or similar policies found. Generating TOC using AI...")
+                else:
+                    logger.info("No template found and no description. Attempting AI generation or using basic template...")
+
                 toc_source = "ai_generated"
                 draft_to_save.metadata.toc_source = toc_source  # Update metadata
 
@@ -133,9 +144,9 @@ class DraftService:
                     # Initialize TOC generation service
                     toc_generator = TOCGenerationService(llm_service)
 
-                    # Generate TOC based on description
+                    # Generate TOC based on description (or basic info if no description)
                     generated_toc = await toc_generator.generate_toc_from_description(
-                        description=description,
+                        description=description if has_description else f"A {policy_type} policy for {function}",
                         title=title,
                         client_metadata=client_metadata,
                         function=function,
@@ -152,10 +163,14 @@ class DraftService:
                 else:
                     # Fallback to basic structure if no LLM service available
                     logger.warning("No LLM service available for TOC generation, using basic template")
+                    toc_source = "basic_template"
+                    draft_to_save.metadata.toc_source = toc_source
                     draft_to_save.toc = self._get_basic_toc_template()
             else:
-                # No template, no description - cannot create draft
-                raise Exception("Cannot create draft: No template found and no description provided")
+                # This should never be reached, but keep as safety fallback
+                logger.warning("Unexpected state - using basic template")
+                draft_to_save.toc = self._get_basic_toc_template()
+                draft_to_save.metadata.toc_source = "basic_template"
 
             success = self.storage.create_draft(draft_to_save)
 

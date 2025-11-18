@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from app.config.settings import settings
 from app.pipelines.components.embedder import AzureEmbedder
+from app.models.regulation_models import RegulationChunk
 
 from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
@@ -28,22 +29,32 @@ class UploadResult:
 
 class AzureVectorStore:
     """Simplified Azure AI Search store - vectors only for policy descriptions."""
-    
+
     def __init__(self, embedder: AzureEmbedder):
         self.index_name = settings.AZURE_SEARCH_INDEX_NAME
+        self.regulations_index_name = settings.AZURE_SEARCH_REGULATIONS_INDEX_NAME
         self.embedder = embedder
-        
+
         logger.info(f"Initializing Simplified AzureVectorStore:")
         logger.info(f"Endpoint: {settings.AZURE_SEARCH_ENDPOINT}")
-        logger.info(f"Index: {self.index_name}")
-        
+        logger.info(f"Policies Index: {self.index_name}")
+        logger.info(f"Regulations Index: {self.regulations_index_name}")
+
         try:
+            # Client for policies and topics
             self.search_client = SearchClient(
                 endpoint=settings.AZURE_SEARCH_ENDPOINT,
                 index_name=self.index_name,
                 credential=AzureKeyCredential(settings.AZURE_SEARCH_KEY)
             )
-            logger.info("Simplified AzureVectorStore initialized (vectors for policies only)")
+
+            # Separate client for regulations
+            self.regulations_client = SearchClient(
+                endpoint=settings.AZURE_SEARCH_ENDPOINT,
+                index_name=self.regulations_index_name,
+                credential=AzureKeyCredential(settings.AZURE_SEARCH_KEY)
+            )
+            logger.info("AzureVectorStore initialized with separate regulations index")
         except Exception as e:
             logger.error(f"Failed to initialize AzureVectorStore: {e}")
             raise
@@ -402,15 +413,286 @@ class AzureVectorStore:
                 select="id,filename,description,source,toc,topic_ids",
                 top=max_results
             )
-            
+
             policies = []
             for result in results:
                 # Parse TOC JSON
                 result["toc"] = json.loads(result.get("toc", "[]"))
                 policies.append(result)
-            
+
             return policies
-            
+
         except Exception as e:
             logger.error(f"Failed to retrieve all policies: {e}")
+            return []
+
+    # ============================================================
+    # REGULATIONS METHODS
+    # ============================================================
+
+    def _create_regulation_document(self, regulation_chunk: RegulationChunk) -> Dict[str, Any]:
+        """Create Azure Search document from RegulationChunk."""
+        return {
+            "id": regulation_chunk.id,
+            "record_type": "regulation",
+            "content": regulation_chunk.content,
+            "regulation_category": regulation_chunk.regulation_category,
+            "decree_name": regulation_chunk.decree_name,
+            "article_number": regulation_chunk.article_number or "",
+            "chapter": regulation_chunk.chapter or "",
+            "regulation_type": regulation_chunk.regulation_type,
+            "effective_date": regulation_chunk.effective_date or "",
+            "superseded_by": regulation_chunk.superseded_by or "",
+            "topics": regulation_chunk.topics,
+            "references": regulation_chunk.references,
+            # Vector will be added during indexing
+            "content_vector": []
+        }
+
+    def _upload_regulations_batch(self, documents: List[Dict[str, Any]]) -> UploadResult:
+        """Upload a batch of regulation documents using regulations client."""
+        try:
+            result = self.regulations_client.upload_documents(documents)
+
+            successful = sum(1 for item in result if item.succeeded)
+            failed = len(result) - successful
+
+            if failed > 0:
+                logger.error(f"Failed to upload {failed} regulation documents in batch")
+                for item in result:
+                    if not item.succeeded:
+                        logger.error(f"Upload error for doc {getattr(item, 'key', 'unknown')}: {item.error_message}")
+
+            return UploadResult(successful=successful, failed=failed, total=len(documents))
+
+        except AzureError as e:
+            logger.error(f"Azure error during regulation batch upload: {e}")
+            return UploadResult(successful=0, failed=len(documents), total=len(documents))
+        except Exception as e:
+            logger.error(f"Unexpected error during regulation batch upload: {e}")
+            return UploadResult(successful=0, failed=len(documents), total=len(documents))
+
+    async def index_regulations(self, chunks: List[RegulationChunk]) -> bool:
+        """
+        Index regulation chunks with embeddings in Azure Search.
+
+        Args:
+            chunks: List of RegulationChunk objects to index
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not chunks:
+            logger.warning("No regulation chunks to index")
+            return True
+
+        logger.info(f"Indexing {len(chunks)} regulation chunks into '{self.regulations_index_name}'")
+
+        try:
+            documents_to_upload = []
+
+            # Collect all texts for batch embedding
+            texts = [chunk.content for chunk in chunks]
+
+            # Generate embeddings in batch for better performance
+            logger.info(f"Generating embeddings for {len(texts)} chunks...")
+            embeddings = self.embedder.embed_documents(texts)
+            logger.info(f"Successfully generated {len(embeddings)} embeddings")
+
+            # Create search documents with embeddings
+            for chunk, embedding in zip(chunks, embeddings):
+                search_doc = self._create_regulation_document(chunk)
+                search_doc["content_vector"] = embedding
+                documents_to_upload.append(search_doc)
+
+            # Upload in batches using regulations client
+            batch_size = getattr(settings, 'BATCH_SIZE', 24)
+            total_result = UploadResult(successful=0, failed=0, total=len(documents_to_upload))
+
+            for i in range(0, len(documents_to_upload), batch_size):
+                batch = documents_to_upload[i:i + batch_size]
+                batch_result = self._upload_regulations_batch(batch)
+
+                total_result.successful += batch_result.successful
+                total_result.failed += batch_result.failed
+
+                logger.info(f"Batch {i // batch_size + 1} complete: {batch_result.successful} successful")
+
+            logger.info(f"Regulation indexing complete: {total_result.successful} successful, "
+                       f"{total_result.failed} failed")
+
+            return total_result.failed == 0
+
+        except Exception as e:
+            logger.error(f"Failed to index regulations: {e}")
+            return False
+
+    async def search_relevant_regulations(
+        self,
+        query_text: str,
+        regulation_name: Optional[str] = "UAE Labor Law",
+        top_k: int = 7,
+        min_score: float = 0.75,
+        context: Optional[Dict[str, Any]] = None
+    ) -> List[RegulationChunk]:
+        """
+        Search for relevant regulation chunks using hybrid search.
+
+        Args:
+            query_text: The search query (topic title + description)
+            regulation_name: Filter by regulation name (e.g., "UAE Labor Law")
+            top_k: Number of results to return
+            min_score: Minimum similarity score threshold
+            context: Additional context (industry, policy_type, client_requests, etc.)
+
+        Returns:
+            List of RegulationChunk objects with relevance scores
+        """
+        try:
+            # Build enriched query with context
+            enriched_query = query_text
+            if context:
+                if context.get('industry'):
+                    enriched_query += f" {context['industry']}"
+                if context.get('policy_type'):
+                    enriched_query += f" {context['policy_type']}"
+                if context.get('client_requests'):
+                    enriched_query += f" {context['client_requests']}"
+
+            logger.info(f"Searching regulations with query: {enriched_query[:100]}...")
+
+            # Generate embedding for the query
+            query_vector = self.embedder.embed_query(enriched_query)
+
+            # Build filter
+            # Prioritize primary and amendment types, exclude superseded regulations
+            filter_parts = ["record_type eq 'regulation'"]
+
+            # Filter by regulation category if specified
+            if regulation_name:
+                filter_parts.append(f"regulation_category eq '{regulation_name}'")
+
+            # Exclude superseded regulations
+            filter_parts.append("superseded_by eq ''")
+
+            filter_query = " and ".join(filter_parts)
+
+            # Perform hybrid search (vector + keyword)
+            from azure.search.documents.models import VectorizedQuery
+
+            vector_query = VectorizedQuery(
+                vector=query_vector,
+                k_nearest_neighbors=top_k * 2,  # Get more results for filtering
+                fields="content_vector"
+            )
+
+            results = self.regulations_client.search(
+                search_text=query_text,  # Keyword search on content
+                vector_queries=[vector_query],
+                filter=filter_query,
+                select="id,content,regulation_category,decree_name,article_number,chapter,regulation_type,effective_date,superseded_by,topics,references",
+                top=top_k * 2
+            )
+
+            # Process results and prioritize amendments
+            processed_results = []
+            for result in results:
+                # Get similarity score
+                score = getattr(result, '@search.score', 0.0)
+                # Normalize score to 0-1 range
+                similarity_score = min(score / 10.0, 1.0) if score > 1.0 else score
+
+                if similarity_score >= min_score:
+                    chunk = RegulationChunk(
+                        id=result["id"],
+                        content=result["content"],
+                        regulation_category=result["regulation_category"],
+                        decree_name=result["decree_name"],
+                        article_number=result.get("article_number", ""),
+                        chapter=result.get("chapter", ""),
+                        regulation_type=result["regulation_type"],
+                        effective_date=result.get("effective_date"),
+                        superseded_by=result.get("superseded_by"),
+                        topics=result.get("topics", []),
+                        references=result.get("references", []),
+                        score=similarity_score
+                    )
+                    processed_results.append(chunk)
+
+            # Prioritize amendments over primary laws
+            def sort_key(chunk: RegulationChunk):
+                # Amendment type gets priority
+                type_priority = 0 if chunk.regulation_type == "amendment" else 1
+                # Then by score
+                return (type_priority, -chunk.score)
+
+            processed_results.sort(key=sort_key)
+
+            # Take top_k results
+            final_results = processed_results[:top_k]
+
+            logger.info(f"Found {len(final_results)} relevant regulation chunks "
+                       f"(min_score={min_score})")
+
+            return final_results
+
+        except Exception as e:
+            logger.error(f"Failed to search regulations: {e}")
+            return []
+
+    async def search_regulations_by_article(
+        self,
+        article_query: str,
+        regulation_name: Optional[str] = None
+    ) -> List[RegulationChunk]:
+        """
+        Search for specific articles by number or topic.
+
+        This is used when the user requests a specific article.
+
+        Args:
+            article_query: Article number or topic (e.g., "Article 15" or "leave entitlements")
+            regulation_name: Optional regulation name to filter by
+
+        Returns:
+            List of matching RegulationChunk objects
+        """
+        try:
+            filter_parts = ["record_type eq 'regulation'"]
+
+            if regulation_name:
+                filter_parts.append(f"regulation_category eq '{regulation_name}'")
+
+            filter_query = " and ".join(filter_parts)
+
+            # Use keyword search for article numbers
+            results = self.regulations_client.search(
+                search_text=article_query,
+                filter=filter_query,
+                select="id,content,regulation_category,decree_name,article_number,chapter,regulation_type,effective_date,superseded_by,topics,references",
+                top=10
+            )
+
+            chunks = []
+            for result in results:
+                chunk = RegulationChunk(
+                    id=result["id"],
+                    content=result["content"],
+                    regulation_category=result["regulation_category"],
+                    decree_name=result["decree_name"],
+                    article_number=result.get("article_number", ""),
+                    chapter=result.get("chapter", ""),
+                    regulation_type=result["regulation_type"],
+                    effective_date=result.get("effective_date"),
+                    superseded_by=result.get("superseded_by"),
+                    topics=result.get("topics", []),
+                    references=result.get("references", [])
+                )
+                chunks.append(chunk)
+
+            logger.info(f"Found {len(chunks)} articles matching '{article_query}'")
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Failed to search regulations by article: {e}")
             return []
