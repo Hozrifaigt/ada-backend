@@ -131,6 +131,19 @@ class TopicContext(BaseModel):
     current_topic_toc: Optional[Dict[str, Any]] = Field(None, description="Current topic TOC item")
 
 
+class CritiqueResponse(BaseModel):
+    """Reflection agent critique of generated content."""
+    score: float = Field(..., ge=0.0, le=1.0, description="Quality score 0-1")
+    alignment_score: float = Field(..., ge=0.0, le=1.0, description="Alignment with client requirements 0-1")
+    strengths: List[str] = Field(default_factory=list, description="Positive aspects of content")
+    weaknesses: List[str] = Field(default_factory=list, description="Areas for improvement")
+    improvements: List[str] = Field(default_factory=list, description="Specific improvements suggested")
+    compliance_gaps: List[str] = Field(default_factory=list, description="Regulatory or requirement gaps")
+    recommendations: str = Field(..., description="Comprehensive recommendations")
+    requires_revision: bool = Field(default=False, description="Whether content needs revision")
+    fixed_content: Optional[str] = Field(None, description="Auto-improved content if revision was performed")
+
+
 class ContentGenerationResponse(BaseModel):
     """Response after content generation."""
     content: str = Field(..., description="Generated content")
@@ -139,6 +152,7 @@ class ContentGenerationResponse(BaseModel):
     word_count: int = Field(default=0, description="Word count of generated content")
     message: str
     is_chat_response: bool = Field(default=False, description="True if this is a chat response, not actual policy content")
+    critique: Optional[CritiqueResponse] = Field(None, description="Reflection agent critique (if available)")
 
 
 # ============= Data Models (for internal use) =============

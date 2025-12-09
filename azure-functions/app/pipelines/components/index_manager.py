@@ -243,12 +243,9 @@ class AzureSearchIndexManager:
                 SearchableField(name="regulation_category", type=SearchFieldDataType.String, searchable=True, filterable=True, facetable=True),
                 SearchableField(name="decree_name", type=SearchFieldDataType.String, searchable=True, filterable=True),
                 SearchableField(name="article_number", type=SearchFieldDataType.String, searchable=True, filterable=True),
-                SearchableField(name="chapter", type=SearchFieldDataType.String, searchable=True),
                 SimpleField(name="regulation_type", type=SearchFieldDataType.String, filterable=True, facetable=True),
                 SimpleField(name="effective_date", type=SearchFieldDataType.String, filterable=True, sortable=True),
-                SimpleField(name="superseded_by", type=SearchFieldDataType.String, filterable=True),
-                SearchField(name="topics", type=SearchFieldDataType.Collection(SearchFieldDataType.String), searchable=True, filterable=True, facetable=True),
-                SearchField(name="references", type=SearchFieldDataType.Collection(SearchFieldDataType.String), searchable=True)
+                SearchField(name="topics", type=SearchFieldDataType.Collection(SearchFieldDataType.String), searchable=True, filterable=True, facetable=True)
             ]
 
             # Vector search configuration for regulations
@@ -281,9 +278,7 @@ class AzureSearchIndexManager:
                         SemanticField(field_name="content")
                     ],
                     keywords_fields=[
-                        SemanticField(field_name="regulation_category"),
-                        SemanticField(field_name="article_number"),
-                        SemanticField(field_name="chapter")
+                        SemanticField(field_name="topics")
                     ]
                 )
             )

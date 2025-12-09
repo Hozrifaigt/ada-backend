@@ -83,15 +83,6 @@ def update_index_schema():
                 facetable=False
             ),
             SearchField(
-                name="chapter",
-                type=SearchFieldDataType.String,
-                searchable=True,
-                filterable=False,
-                retrievable=True,
-                sortable=False,
-                facetable=False
-            ),
-            SearchField(
                 name="regulation_type",
                 type=SearchFieldDataType.String,
                 searchable=False,
@@ -110,15 +101,6 @@ def update_index_schema():
                 facetable=False
             ),
             SearchField(
-                name="superseded_by",
-                type=SearchFieldDataType.String,
-                searchable=False,
-                filterable=True,
-                retrievable=True,
-                sortable=False,
-                facetable=False
-            ),
-            SearchField(
                 name="topics",
                 type=SearchFieldDataType.Collection(SearchFieldDataType.String),
                 searchable=True,
@@ -126,15 +108,6 @@ def update_index_schema():
                 retrievable=True,
                 sortable=False,
                 facetable=True
-            ),
-            SearchField(
-                name="references",
-                type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-                searchable=True,
-                filterable=False,
-                retrievable=True,
-                sortable=False,
-                facetable=False
             ),
         ]
 

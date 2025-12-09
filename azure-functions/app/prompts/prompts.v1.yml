@@ -316,6 +316,8 @@ generate_from_scratch:
     - The balance between "what" and "how"
     - The level of specific examples and scenarios to include
 
+    {topic_structure_guidance}
+
     FULL TABLE OF CONTENTS:
     (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
     {full_table_of_contents}
@@ -357,6 +359,7 @@ generate_from_scratch:
     12. IMPORTANT: Address the client-specific requests: {client_specific_requests}
     13. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
     14. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+    15. IMPORTANT: If TOPIC STRUCTURE GUIDANCE is provided above, follow it carefully to ensure proper content depth
 
     CONTENT:
 

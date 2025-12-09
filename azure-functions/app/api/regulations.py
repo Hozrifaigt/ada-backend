@@ -21,7 +21,7 @@ from azure.core.credentials import AzureKeyCredential
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/regulations", tags=["Regulations"])
+router = APIRouter(prefix="/regulations", tags=["Regulations"])
 
 
 @router.post("/index", response_model=RegulationsIndexStatus)
@@ -285,9 +285,9 @@ async def create_regulations_index(
     Fields in the index:
     - id, record_type
     - content, content_vector (regulation text and embeddings)
-    - regulation_name, article_number, chapter
-    - regulation_type, effective_date, superseded_by
-    - topics, references
+    - regulation_name, article_number
+    - regulation_type, effective_date
+    - topics
 
     Returns:
         Dictionary with creation status

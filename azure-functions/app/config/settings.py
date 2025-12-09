@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Regulations path - defaults to Docker path, can be overridden
     REGULATIONS_PATH: str = "/code/app/regulations"
 
+    # Regulation Search Settings
+    REGULATION_SEARCH_MIN_SCORE: float = 0.55
+    REGULATION_SEARCH_TOP_K: int = 5
+
     # Rate Limiting Settings
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_PER_MINUTE: int = 60  # Max requests per minute per user (across all endpoints)

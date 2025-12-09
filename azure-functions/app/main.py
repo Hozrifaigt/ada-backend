@@ -97,7 +97,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 app.include_router(auth.router, prefix="/api/v1", tags=["Authentication"])
 app.include_router(policy_router, prefix="/api/v1", tags=["Policy Drafting"])
 app.include_router(drafts.router, prefix="/api/v1", tags=["Draft Management"])
-app.include_router(regulations.router, tags=["Regulations Management"])
+app.include_router(regulations.router, prefix="/api/v1", tags=["Regulations Management"])
 app.include_router(user.router, prefix="/api/v1", tags=["User Management"])
 app.include_router(processing.router, prefix="/api/v1", tags=["Pipeline Trigger"])
 app.include_router(admin.router, prefix="/api/v1", tags=["Administration"])

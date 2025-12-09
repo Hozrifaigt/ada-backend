@@ -29,7 +29,8 @@ from app.models.draft_models import (
     DraftListResponse,
     DraftProgress,
     TopicContext,
-    ContentGenerationResponse
+    ContentGenerationResponse,
+    CritiqueResponse
 )
 from app.models.toc_chat_models import (
     TOCChatMessage,
@@ -481,7 +482,8 @@ async def generate_topic_content(
                 summary=result.get("summary", ""),
                 word_count=result.get("word_count", 0),
                 message="Content generated successfully",
-                is_chat_response=result.get("is_chat_response", False)
+                is_chat_response=result.get("is_chat_response", False),
+                critique=result.get("critique")
             )
         else:
             raise HTTPException(
@@ -1065,4 +1067,65 @@ async def create_draft_from_template(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create draft from template: {str(e)}"
+        )
+
+
+@router.post("/test/regulations-retrieval")
+async def test_regulations_retrieval(
+    query_text: str,
+    regulation_name: Optional[str] = None,
+    top_k: int = 7,
+    min_score: float = 0.75,
+    store = Depends(get_store),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Test endpoint to retrieve regulation chunks.
+    
+    This endpoint searches for regulation chunks based on a query and returns
+    the results for testing and validation purposes.
+    
+    Args:
+        query_text: Search query text (required)
+        regulation_name: Optional filter by regulation name
+        top_k: Number of results to return (default: 7, max: 20)
+        min_score: Minimum similarity score (default: 0.75)
+    
+    Returns:
+        List of matching regulation chunks with scores
+    """
+    logger.info(f"Test regulations retrieval requested by {current_user.get('email')}")
+    logger.info(f"Query: {query_text}, Regulation: {regulation_name}, top_k: {top_k}, min_score: {min_score}")
+    
+    try:
+        # Call the search method from vector store
+        regulation_chunks = await store.search_relevant_regulations(
+            query_text=query_text,
+            regulation_name=regulation_name,
+            top_k=top_k,
+            min_score=min_score,
+            context={}
+        )
+        
+        logger.info(f"Retrieved {len(regulation_chunks)} regulation chunks")
+        
+        # Format response
+        return {
+            "status": "success",
+            "total_results": len(regulation_chunks),
+            "query": query_text,
+            "filters": {
+                "regulation_name": regulation_name,
+                "top_k": top_k,
+                "min_score": min_score
+            },
+            "chunks": [chunk.model_dump() for chunk in regulation_chunks],
+            "message": f"Successfully retrieved {len(regulation_chunks)} regulation chunks"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to retrieve regulations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve regulations: {str(e)}"
         )

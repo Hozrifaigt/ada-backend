@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from app.prompts.manager import PromptManager
 from app.services.query_classification_service import QueryClassificationService, create_classification_service
+from app.services.reflection_agent import ReflectionAgent, ReflectionCritique
 from app.models.classification_models import QueryCategory
 from app.models.draft_models import CompleteDraft, DraftMetadata
 from app.models.regulation_models import RegulationChunk
@@ -16,11 +17,17 @@ logger = logging.getLogger(__name__)
 class ContentGenerationService:
     """Service for generating content with RAG and sequential context."""
 
-    def __init__(self):
-        """Initialize the generation service."""
+    def __init__(self, reflection_agent: Optional[ReflectionAgent] = None):
+        """
+        Initialize the generation service.
+        
+        Args:
+            reflection_agent: Optional reflection agent for response critique
+        """
         # Initialize query classification service
         self.classification_service = create_classification_service()
         self.prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
+        self.reflection_agent = reflection_agent
 
     def _map_detail_level(self, detail_level: int) -> str:
         """
@@ -50,12 +57,13 @@ class ContentGenerationService:
         user_prompt: str,
         vector_store,
         llm_service
-    ) -> Tuple[str, List[str], bool]:
+    ) -> Tuple[str, List[str], bool, Optional[ReflectionCritique]]:
         """
         Generate content for a topic or subtopic using RAG and context.
 
         Returns:
-            Tuple of (generated_content, source_ids_used, is_chat_response)
+            Tuple of (generated_content, source_ids_used, is_chat_response, critique)
+            where critique is None for chat responses or if reflection agent unavailable
         """
         try:
             # Step 1: Find the topic in TOC
@@ -92,10 +100,11 @@ class ContentGenerationService:
                 suggested_response = self.classification_service.get_suggested_response(
                     classification_result.classification
                 )
-                # Return the suggested response as a chat response, not content
-                return suggested_response, [], True
+                # Return the suggested response as a chat response, not content (no critique for blocked queries)
+                return suggested_response, [], True, None
 
             # Step 4: Determine what we're generating
+            subtopic_item = None  # Initialize for later reuse
             if subtopic_id:
                 subtopic_item = self._find_subtopic(toc_item, subtopic_id)
                 if not subtopic_item:
@@ -103,39 +112,39 @@ class ContentGenerationService:
                 topic_title = subtopic_item.topic
                 source_id = subtopic_item.source_subtopic_id
             else:
-                topic_title = toc_item.topic  # Use directly, no need for separate 'title' variable
+                topic_title = toc_item.topic
                 source_id = toc_item.source_topic_id
 
-            # Step 5: Get conversation history for generation - last 3 legitimate only
-            generation_history = self._get_conversation_history(
-                draft, topic_id, subtopic_id, limit=3, for_llm_context=True
-            )
-            formatted_generation_history = self._format_conversation_history_for_prompt(generation_history)
+            # # Step 5: Get conversation history for generation - last 3 legitimate only
+            # generation_history = self._get_conversation_history(
+            #     draft, topic_id, subtopic_id, limit=3, for_llm_context=True
+            # )
+            # formatted_generation_history = self._format_conversation_history_for_prompt(generation_history)
 
-            # Step 6: Try to retrieve existing content if source_id exists
-            if source_id:
-                existing_content = await self._retrieve_existing_content(source_id, vector_store)
-                if existing_content:
-                    adapted_content = await self._adapt_existing_content(
-                        existing_content=existing_content,
-                        user_prompt=user_prompt,
-                        draft=draft,
-                        topic_id=topic_id,
-                        subtopic_id=subtopic_id,
-                        conversation_history=formatted_generation_history,
-                        llm_service=llm_service
-                    )
+            # # Step 6: Try to retrieve existing content if source_id exists
+            # if source_id:
+            #     existing_content = await self._retrieve_existing_content(source_id, vector_store)
+            #     if existing_content:
+            #         adapted_content = await self._adapt_existing_content(
+            #             existing_content=existing_content,
+            #             user_prompt=user_prompt,
+            #             draft=draft,
+            #             topic_id=topic_id,
+            #             subtopic_id=subtopic_id,
+            #             conversation_history=formatted_generation_history,
+            #             llm_service=llm_service
+            #         )
 
-                    # Add conversation to draft history before returning
-                    logger.info(f"DEBUG: About to add conversation for topic {topic_id}, subtopic {subtopic_id} (adapted content path)")
-                    self._add_conversation_to_draft(
-                        draft, topic_id, user_prompt, adapted_content, subtopic_id
-                    )
+            #         # Add conversation to draft history before returning
+            #         logger.info(f"DEBUG: About to add conversation for topic {topic_id}, subtopic {subtopic_id} (adapted content path)")
+            #         self._add_conversation_to_draft(
+            #             draft, topic_id, user_prompt, adapted_content, subtopic_id
+            #         )
 
-                    return adapted_content, [source_id], False
+            #         return adapted_content, [source_id], False
 
-            # Step 7: Search for similar topics (for custom topics without source_id)
-            similar_topics = await self._search_similar_topics(topic_title, vector_store, threshold=0.7)
+            # # Step 7: Search for similar topics (for custom topics without source_id)
+            # similar_topics = await self._search_similar_topics(topic_title, vector_store, threshold=0.7)
 
             # Step 7.5: Search for relevant regulations
             regulation_chunks = await self._search_relevant_regulations(
@@ -144,7 +153,7 @@ class ContentGenerationService:
                 draft_metadata=draft.metadata,
                 vector_store=vector_store
             )
-
+            
             # Step 8: Build complete context
             sequential_context = self._build_sequential_context(
                 draft,
@@ -155,52 +164,82 @@ class ContentGenerationService:
             # Format the full TOC for LLM context
             full_toc = self._format_full_toc(draft.toc)
 
-            # Step 9: Generate content based on what we found
-            if similar_topics:
-                # Generate with similar topics as reference
-                content = await self._generate_with_references(
-                    title=topic_title,
-                    user_prompt=user_prompt,
-                    similar_topics=similar_topics,
-                    sequential_context=sequential_context,
-                    draft_metadata=draft.metadata,
-                    conversation_history=formatted_generation_history,
-                    llm_service=llm_service,
-                    full_toc=full_toc,
-                    regulation_chunks=regulation_chunks
-                )
-                source_ids = [topic.get("id", topic.get("topic_id", "unknown")) for topic in similar_topics[:3]]
-            else:
-                # Generate from scratch
-                content = await self._generate_from_scratch(
-                    title=topic_title,
-                    user_prompt=user_prompt,
-                    sequential_context=sequential_context,
-                    draft_metadata=draft.metadata,
-                    conversation_history=formatted_generation_history,
-                    llm_service=llm_service,
-                    full_toc=full_toc,
-                    regulation_chunks=regulation_chunks
-                )
-                source_ids = []
+            # Step 9: Build topic structure guidance
+            # If generating a main topic with subtopics, guide LLM to be introductory
+            topic_structure_guidance = self._build_topic_structure_guidance(
+                toc_item=toc_item,
+                subtopic_id=subtopic_id
+            )
 
-            # Step 10: Add conversation to draft history
-            logger.info(f"DEBUG: About to add conversation for topic {topic_id}, subtopic {subtopic_id}")
+            # Step 10: Generate content (with regulations context if available)
+            content = await self._generate_from_scratch(
+                title=topic_title,
+                user_prompt=user_prompt,
+                sequential_context=sequential_context,
+                draft_metadata=draft.metadata,
+                conversation_history="",
+                llm_service=llm_service,
+                full_toc=full_toc,
+                regulation_chunks=regulation_chunks,
+                topic_structure_guidance=topic_structure_guidance
+            )
+            source_ids = []
+
+            # Step 11: Reflection & Critique (if agent available)
+            # Flow: critique_and_fix() does one critique + regenerate if needed (3 LLM calls max)
+            # Note: We reuse toc_item and subtopic_item from Step 4 above
+            critique = None
+            if self.reflection_agent:
+                try:
+                    # Get conversation history (reuse toc_item from Step 1, subtopic_item from Step 4)
+                    if subtopic_id and subtopic_item:
+                        conversation_history = subtopic_item.conversation_history
+                    else:
+                        conversation_history = toc_item.conversation_history
+
+                    # Perform critique and auto-fix if needed (single call handles everything)
+                    critique = await self.reflection_agent.critique_and_fix(
+                        generated_content=content,
+                        draft=draft,
+                        topic_id=topic_id,
+                        subtopic_id=subtopic_id,
+                        user_prompt=user_prompt,
+                        conversation_history=conversation_history,
+                        regulation_chunks=regulation_chunks,
+                        source_ids=source_ids,
+                        detail_level=draft.metadata.detail_level
+                    )
+
+                    # Use fixed content if available (score was below threshold)
+                    if critique.fixed_content:
+                        logger.info("Using auto-fixed content from reflection agent")
+                        content = critique.fixed_content
+
+                    # Log critique results
+                    await self.reflection_agent.log_critique_results(
+                        critique=critique,
+                        draft_id=draft.id,
+                        topic_id=topic_id,
+                        subtopic_id=subtopic_id
+                    )
+
+                    logger.info(
+                        f"Reflection critique completed - Score: {critique.score:.2f}, "
+                        f"Alignment: {critique.alignment_score:.2f}, "
+                        f"Regulation Compliance: {critique.regulation_compliance_score:.2f}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Error in reflection critique: {e}", exc_info=True)
+                    # Continue without critique on error
+
+            # Step 12: Add final content to conversation history
+            # Only add after critique so we store the best version (original or fixed)
             self._add_conversation_to_draft(
                 draft, topic_id, user_prompt, content, subtopic_id
             )
 
-            # Verify conversation was added
-            topic = self._find_toc_item(draft.toc, topic_id)
-            if topic:
-                if subtopic_id:
-                    subtopic = self._find_subtopic(topic, subtopic_id)
-                    if subtopic:
-                        logger.info(f"DEBUG: After adding conversation - subtopic {subtopic_id} now has {len(subtopic.conversation_history)} entries")
-                else:
-                    logger.info(f"DEBUG: After adding conversation - topic {topic_id} now has {len(topic.conversation_history)} entries")
-
-            return content, source_ids, False
+            return content, source_ids, False, critique
 
         except Exception as e:
             import traceback
@@ -270,7 +309,7 @@ class ContentGenerationService:
 
         Args:
             topic_title: Title of the current topic
-            user_prompt: User's request/query
+            user_prompt: User's request/query (not used in search - often generic like "generate content")
             draft_metadata: Draft metadata with regulations field
             vector_store: Vector store instance
 
@@ -283,8 +322,10 @@ class ContentGenerationService:
             return []
 
         try:
-            # Build search query from topic title and user prompt
-            query_text = f"{topic_title} {user_prompt}"
+            # Build search query from topic title and policy type
+            # Note: user_prompt is excluded as it's often generic (e.g., "generate content for this topic")
+            # policy_type is more descriptive (e.g., "Leave Policy", "Termination Policy")
+            query_text = f"{topic_title} {draft_metadata.policy_type}"
 
             # Build context for better search
             context = {
@@ -295,29 +336,26 @@ class ContentGenerationService:
                 "sector_comments": draft_metadata.sector_specific_comments or ""
             }
 
-            logger.info(f"Searching regulations for: {draft_metadata.regulations}")
+            logger.info(f"Searching regulations for: {draft_metadata.regulations} with query: {query_text}")
 
-            # Search regulations
+            # Search regulations using settings constants
             regulation_chunks = await vector_store.search_relevant_regulations(
                 query_text=query_text,
                 regulation_name=draft_metadata.regulations,
-                top_k=7,
-                min_score=0.75,
+                top_k=settings.REGULATION_SEARCH_TOP_K,
+                min_score=settings.REGULATION_SEARCH_MIN_SCORE,
                 context=context
             )
 
-            # If no results found with strict threshold, try with relaxed threshold
-            if not regulation_chunks:
-                logger.info("No regulations found with score >= 0.75, trying with relaxed threshold")
-                regulation_chunks = await vector_store.search_relevant_regulations(
-                    query_text=query_text,
-                    regulation_name=draft_metadata.regulations,
-                    top_k=5,
-                    min_score=0.65,
-                    context=context
-                )
+            # Log retrieved regulations for debugging
+            if regulation_chunks:
+                logger.info(f"Retrieved {len(regulation_chunks)} regulations for '{topic_title}':")
+                for chunk in regulation_chunks[:3]:
+                    topics_preview = chunk.topics[:3] if chunk.topics else []
+                    logger.info(f"  - {chunk.article_number} (score: {chunk.score:.2f}): {topics_preview}")
+            else:
+                logger.warning(f"No regulations found for '{topic_title}' with query: {query_text}")
 
-            logger.info(f"Found {len(regulation_chunks)} relevant regulation chunks")
             return regulation_chunks
 
         except Exception as e:
@@ -341,13 +379,61 @@ class ContentGenerationService:
         for i, chunk in enumerate(regulation_chunks):
             article_info = f"{chunk.article_number}" if chunk.article_number else "Section"
             decree_name = chunk.decree_name
+            effective_date = chunk.effective_date or "Unknown"
             content = chunk.content
 
             formatted_parts.append(
-                f"[Regulation {i+1}] {article_info} - {decree_name}\n{content}"
+                f"[Regulation {i+1}] {article_info} - {decree_name} (Effective: {effective_date})\n{content}"
             )
 
         return "\n\n".join(formatted_parts)
+
+    def _build_topic_structure_guidance(
+        self,
+        toc_item,
+        subtopic_id: Optional[str]
+    ) -> str:
+        """
+        Build guidance for content depth based on topic structure.
+
+        If generating a main topic that has subtopics, instruct LLM to be
+        introductory/high-level since details will be covered in subtopics.
+
+        Args:
+            toc_item: The topic being generated
+            subtopic_id: If provided, we're generating a subtopic (not main topic)
+
+        Returns:
+            Guidance string for the prompt
+        """
+        # If generating a subtopic, no special guidance needed
+        if subtopic_id:
+            return ""
+
+        # Check if main topic has subtopics
+        if not toc_item.subtopics or len(toc_item.subtopics) == 0:
+            return ""
+
+        # Main topic has subtopics - provide guidance to be introductory
+        subtopic_names = [sub.topic for sub in toc_item.subtopics]
+        subtopics_list = ", ".join(f'"{name}"' for name in subtopic_names)
+
+        guidance = f"""TOPIC STRUCTURE GUIDANCE:
+This topic "{toc_item.topic}" has the following subtopics that will be created separately:
+{subtopics_list}
+
+IMPORTANT: Since detailed content will be provided in each subtopic, this main topic should:
+1. Provide a HIGH-LEVEL OVERVIEW and introduction to the subject
+2. Explain the PURPOSE and SCOPE of this policy area
+3. List the key principles or general guidelines
+4. DO NOT go into specific details that belong in the subtopics listed above
+5. Keep content introductory - the subtopics will cover specifics like procedures, eligibility, and detailed requirements
+
+For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "Maternity Leave":
+- This main topic should introduce the company's leave philosophy and general entitlements
+- Specific details about annual leave duration, sick leave procedures, or maternity leave eligibility should be deferred to their respective subtopics"""
+
+        return guidance
 
     async def _adapt_existing_content(
         self,
@@ -448,7 +534,8 @@ class ContentGenerationService:
         conversation_history: str,
         llm_service,
         full_toc: str,
-        regulation_chunks: List[RegulationChunk] = None
+        regulation_chunks: List[RegulationChunk] = None,
+        topic_structure_guidance: str = ""
     ) -> str:
         """Generate content from scratch when no references are available."""
 
@@ -471,7 +558,8 @@ class ContentGenerationService:
             topic_title=title,
             user_requirements=user_prompt,
             previous_topics=self._format_context_for_prompt(sequential_context),
-            conversation_history=conversation_history
+            conversation_history=conversation_history,
+            topic_structure_guidance=topic_structure_guidance
         )
 
         response = await llm_service.generate(prompt)

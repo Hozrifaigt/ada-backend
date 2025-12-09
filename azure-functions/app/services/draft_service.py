@@ -8,6 +8,10 @@ from app.models.policy_models import SimilarPolicyRequest, PolicyMatch
 from app.models.draft_models import ClientMetadata, DraftMetadata, CompleteDraft
 from app.services.generation_service import ContentGenerationService
 from app.services.toc_generation_service import TOCGenerationService
+from app.services.reflection_agent import ReflectionAgent
+from app.pipelines.components.llm import AzureLLM
+from app.prompts.manager import PromptManager
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +22,12 @@ class DraftService:
     def __init__(self, storage_service):
         """Initialize draft service with storage dependency."""
         self.storage = storage_service
-        self.generation_service = ContentGenerationService()
+
+        # Initialize reflection agent for content critique
+        prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
+        llm_service = AzureLLM(prompt_manager)
+        reflection_agent = ReflectionAgent(llm_service)
+        self.generation_service = ContentGenerationService(reflection_agent=reflection_agent)
     
     async def initialize_draft_from_description(
         self,
@@ -1002,7 +1011,7 @@ class DraftService:
                     break
 
             # Generate content using the generation service
-            content, source_ids, is_chat_response = await self.generation_service.generate_topic_content(
+            content, source_ids, is_chat_response, critique = await self.generation_service.generate_topic_content(
                 draft=draft,
                 topic_id=topic_id,
                 subtopic_id=subtopic_id,
@@ -1065,13 +1074,28 @@ class DraftService:
             success = self.storage.update_draft(draft_id, draft)
 
             if success:
+                # Build critique dict if available
+                critique_dict = None
+                if critique:
+                    critique_dict = {
+                        "score": critique.score,
+                        "alignment_score": critique.alignment_score,
+                        "regulation_compliance_score": critique.regulation_compliance_score,
+                        "strengths": critique.strengths,
+                        "weaknesses": critique.weaknesses,
+                        "improvements": critique.improvements,
+                        "compliance_gaps": critique.compliance_gaps,
+                        "recommendations": critique.recommendations,
+                        "requires_revision": critique.requires_revision
+                    }
                 
                 return {
                     "content": content,
                     "sources_used": source_ids,
                     "summary": summary,
                     "word_count": word_count,
-                    "is_chat_response": is_chat_response
+                    "is_chat_response": is_chat_response,
+                    "critique": critique_dict
                 }
             else:
                 logger.error(f"Failed to save generated content for topic {topic_id}")

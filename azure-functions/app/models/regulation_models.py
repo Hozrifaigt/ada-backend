@@ -12,8 +12,6 @@ class RegulationMetadata(BaseModel):
     decree_name: str = Field(..., description="Full decree name (e.g., 'Federal Decree-Law No. 33 of 2021')")
     regulation_type: str = Field(..., description="Type: primary, amendment, or executive")
     effective_date: Optional[str] = Field(None, description="Effective date in ISO format")
-    supersedes: List[str] = Field(default_factory=list, description="List of regulation names this supersedes")
-    superseded_by: Optional[str] = Field(None, description="Regulation name that supersedes this one")
     decree_number: Optional[str] = Field(None, description="Decree number (e.g., '33 of 2021')")
     file_path: str = Field(..., description="Path to the PDF file")
 
@@ -25,12 +23,10 @@ class RegulationChunk(BaseModel):
     regulation_category: str = Field(..., description="Standardized regulation category (e.g., 'UAE Labor Law', 'ADCG', 'DIFC')")
     decree_name: str = Field(..., description="Full decree name (e.g., 'Federal Decree-Law No. 33 of 2021')")
     article_number: Optional[str] = Field(None, description="Article number (e.g., 'Article 15')")
-    chapter: Optional[str] = Field(None, description="Chapter or section title")
     regulation_type: str = Field(..., description="Type: primary, amendment, or executive")
     effective_date: Optional[str] = Field(None, description="Effective date")
-    superseded_by: Optional[str] = Field(None, description="Regulation that supersedes this")
     topics: List[str] = Field(default_factory=list, description="Auto-tagged topics")
-    references: List[str] = Field(default_factory=list, description="Other articles referenced")
+    page_number: Optional[int] = Field(None, description="Page number in the source PDF")
 
     # For search results
     score: Optional[float] = Field(None, description="Similarity score from search")

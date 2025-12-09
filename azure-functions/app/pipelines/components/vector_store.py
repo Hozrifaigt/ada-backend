@@ -34,11 +34,21 @@ class AzureVectorStore:
         self.index_name = settings.AZURE_SEARCH_INDEX_NAME
         self.regulations_index_name = settings.AZURE_SEARCH_REGULATIONS_INDEX_NAME
         self.embedder = embedder
+        self.llm_service = None
 
         logger.info(f"Initializing Simplified AzureVectorStore:")
         logger.info(f"Endpoint: {settings.AZURE_SEARCH_ENDPOINT}")
         logger.info(f"Policies Index: {self.index_name}")
         logger.info(f"Regulations Index: {self.regulations_index_name}")
+        
+        # Initialize LLM service for synonym expansion
+        try:
+            from app.pipelines.components.llm import AzureLLM
+            from app.prompts.manager import PromptManager
+            self.llm_service = AzureLLM(prompt_manager=PromptManager(settings.PROMPT_MANAGER_PATH))
+            logger.info("LLM service initialized for synonym expansion")
+        except Exception as e:
+            logger.warning(f"Could not initialize LLM service for synonym expansion: {e}")
 
         try:
             # Client for policies and topics
@@ -58,6 +68,50 @@ class AzureVectorStore:
         except Exception as e:
             logger.error(f"Failed to initialize AzureVectorStore: {e}")
             raise
+    
+    async def _expand_synonyms(self, topic: str) -> List[str]:
+        """
+        Expand a topic with synonyms using LLM for better search coverage.
+        
+        Args:
+            topic: The main topic to expand
+            
+        Returns:
+            List of synonyms and variations (includes original topic)
+        """
+        synonyms = [topic]  # Always include original
+        
+        if not self.llm_service:
+            logger.debug(f"LLM service unavailable, returning original topic: {topic}")
+            return synonyms
+        
+        try:
+            prompt = f"""You are helping expand search queries for UAE labor regulations.
+
+Given the topic: {topic}
+
+Provide 4-5 relevant synonyms or variations that a user might use when searching for this concept.
+Include common abbreviations, related terms, and different phrasings.
+
+Return ONLY a JSON array of strings, no other text.
+Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
+            
+            response = await self.llm_service.generate(prompt)
+            
+            # Parse JSON response
+            import json
+            expanded = json.loads(response)
+            
+            if isinstance(expanded, list):
+                # Deduplicate and combine with original
+                synonyms.extend([s for s in expanded if s.lower() != topic.lower()])
+                synonyms = list(dict.fromkeys(synonyms))  # Preserve order, remove duplicates
+                logger.debug(f"Expanded '{topic}' to synonyms: {synonyms}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to expand synonyms for '{topic}': {e}. Using original only.")
+        
+        return synonyms
     
     def _create_base_document(self, doc_id: Optional[str] = None) -> Dict[str, Any]:
         """Create base document structure with required fields."""
@@ -439,12 +493,9 @@ class AzureVectorStore:
             "regulation_category": regulation_chunk.regulation_category,
             "decree_name": regulation_chunk.decree_name,
             "article_number": regulation_chunk.article_number or "",
-            "chapter": regulation_chunk.chapter or "",
             "regulation_type": regulation_chunk.regulation_type,
             "effective_date": regulation_chunk.effective_date or "",
-            "superseded_by": regulation_chunk.superseded_by or "",
             "topics": regulation_chunk.topics,
-            "references": regulation_chunk.references,
             # Vector will be added during indexing
             "content_vector": []
         }
@@ -491,12 +542,21 @@ class AzureVectorStore:
         try:
             documents_to_upload = []
 
-            # Collect all texts for batch embedding
-            texts = [chunk.content for chunk in chunks]
+            # Build enriched texts for embedding that include topics and metadata
+            # This creates powerful vectors that understand the semantic context
+            enriched_texts = []
+            for chunk in chunks:
+                # Concatenate topics + decree_name + article_number + content
+                # This way the embedding captures all semantic signals
+                topics_str = " ".join(chunk.topics) if chunk.topics else ""
+                article_ref = f"{chunk.article_number}" if chunk.article_number else ""
+                
+                enriched_text = f"{topics_str} | {chunk.decree_name} | {article_ref} | {chunk.content}"
+                enriched_texts.append(enriched_text)
 
             # Generate embeddings in batch for better performance
-            logger.info(f"Generating embeddings for {len(texts)} chunks...")
-            embeddings = self.embedder.embed_documents(texts)
+            logger.info(f"Generating enriched embeddings for {len(enriched_texts)} chunks (with topics + metadata)...")
+            embeddings = self.embedder.embed_documents(enriched_texts)
             logger.info(f"Successfully generated {len(embeddings)} embeddings")
 
             # Create search documents with embeddings
@@ -530,111 +590,71 @@ class AzureVectorStore:
     async def search_relevant_regulations(
         self,
         query_text: str,
-        regulation_name: Optional[str] = "UAE Labor Law",
-        top_k: int = 7,
-        min_score: float = 0.75,
+        regulation_name: Optional[str] = None,
+        top_k: int = None,
+        min_score: float = None,
         context: Optional[Dict[str, Any]] = None
     ) -> List[RegulationChunk]:
         """
-        Search for relevant regulation chunks using hybrid search.
+        Search for relevant regulation chunks using simple keyword search.
 
         Args:
-            query_text: The search query (topic title + description)
-            regulation_name: Filter by regulation name (e.g., "UAE Labor Law")
+            query_text: The search query
+            regulation_name: Optional filter by regulation category
             top_k: Number of results to return
-            min_score: Minimum similarity score threshold
-            context: Additional context (industry, policy_type, client_requests, etc.)
+            min_score: Minimum similarity score threshold (not used, kept for compatibility)
+            context: Additional context (not used, kept for compatibility)
 
         Returns:
             List of RegulationChunk objects with relevance scores
         """
+        if top_k is None:
+            top_k = settings.REGULATION_SEARCH_TOP_K
+
         try:
-            # Build enriched query with context
-            enriched_query = query_text
-            if context:
-                if context.get('industry'):
-                    enriched_query += f" {context['industry']}"
-                if context.get('policy_type'):
-                    enriched_query += f" {context['policy_type']}"
-                if context.get('client_requests'):
-                    enriched_query += f" {context['client_requests']}"
+            logger.info(f"Searching regulations for: {query_text}")
 
-            logger.info(f"Searching regulations with query: {enriched_query[:100]}...")
+            # Generate embedding for semantic search
+            query_vector = self.embedder.embed_query(query_text)
 
-            # Generate embedding for the query
-            query_vector = self.embedder.embed_query(enriched_query)
-
-            # Build filter
-            # Prioritize primary and amendment types, exclude superseded regulations
-            filter_parts = ["record_type eq 'regulation'"]
-
-            # Filter by regulation category if specified
-            if regulation_name:
-                filter_parts.append(f"regulation_category eq '{regulation_name}'")
-
-            # Exclude superseded regulations
-            filter_parts.append("superseded_by eq ''")
-
-            filter_query = " and ".join(filter_parts)
-
-            # Perform hybrid search (vector + keyword)
             from azure.search.documents.models import VectorizedQuery
 
             vector_query = VectorizedQuery(
                 vector=query_vector,
-                k_nearest_neighbors=top_k * 2,  # Get more results for filtering
+                k_nearest_neighbors=top_k,
                 fields="content_vector"
             )
 
+            # Hybrid search: BM25 (keywords) + Vector (semantic)
             results = self.regulations_client.search(
-                search_text=query_text,  # Keyword search on content
-                vector_queries=[vector_query],
-                filter=filter_query,
-                select="id,content,regulation_category,decree_name,article_number,chapter,regulation_type,effective_date,superseded_by,topics,references",
-                top=top_k * 2
+                search_text=query_text,
+                search_fields=["topics", "content"],  # BM25 searches these
+                vector_queries=[vector_query],  # Vector searches content_vector
+                select="id,content,regulation_category,decree_name,article_number,regulation_type,effective_date,topics",
+                top=top_k
             )
 
-            # Process results and prioritize amendments
+            # Process results - Azure combines BM25 + vector scores
             processed_results = []
             for result in results:
-                # Get similarity score
-                score = getattr(result, '@search.score', 0.0)
-                # Normalize score to 0-1 range
-                similarity_score = min(score / 10.0, 1.0) if score > 1.0 else score
+                score = result.get('@search.score', 0.0)
 
-                if similarity_score >= min_score:
-                    chunk = RegulationChunk(
-                        id=result["id"],
-                        content=result["content"],
-                        regulation_category=result["regulation_category"],
-                        decree_name=result["decree_name"],
-                        article_number=result.get("article_number", ""),
-                        chapter=result.get("chapter", ""),
-                        regulation_type=result["regulation_type"],
-                        effective_date=result.get("effective_date"),
-                        superseded_by=result.get("superseded_by"),
-                        topics=result.get("topics", []),
-                        references=result.get("references", []),
-                        score=similarity_score
-                    )
-                    processed_results.append(chunk)
+                chunk = RegulationChunk(
+                    id=result["id"],
+                    content=result["content"],
+                    regulation_category=result["regulation_category"],
+                    decree_name=result["decree_name"],
+                    article_number=result.get("article_number", ""),
+                    regulation_type=result["regulation_type"],
+                    effective_date=result.get("effective_date"),
+                    topics=result.get("topics", []),
+                    score=score
+                )
+                processed_results.append(chunk)
 
-            # Prioritize amendments over primary laws
-            def sort_key(chunk: RegulationChunk):
-                # Amendment type gets priority
-                type_priority = 0 if chunk.regulation_type == "amendment" else 1
-                # Then by score
-                return (type_priority, -chunk.score)
+            logger.info(f"Found {len(processed_results)} regulation chunks (hybrid BM25 + vector)")
 
-            processed_results.sort(key=sort_key)
-
-            # Take top_k results
-            final_results = processed_results[:top_k]
-
-            logger.info(f"Found {len(final_results)} relevant regulation chunks "
-                       f"(min_score={min_score})")
-
-            return final_results
+            return processed_results
 
         except Exception as e:
             logger.error(f"Failed to search regulations: {e}")
@@ -669,7 +689,7 @@ class AzureVectorStore:
             results = self.regulations_client.search(
                 search_text=article_query,
                 filter=filter_query,
-                select="id,content,regulation_category,decree_name,article_number,chapter,regulation_type,effective_date,superseded_by,topics,references",
+                select="id,content,regulation_category,decree_name,article_number,regulation_type,effective_date,topics",
                 top=10
             )
 
@@ -681,12 +701,9 @@ class AzureVectorStore:
                     regulation_category=result["regulation_category"],
                     decree_name=result["decree_name"],
                     article_number=result.get("article_number", ""),
-                    chapter=result.get("chapter", ""),
                     regulation_type=result["regulation_type"],
                     effective_date=result.get("effective_date"),
-                    superseded_by=result.get("superseded_by"),
-                    topics=result.get("topics", []),
-                    references=result.get("references", [])
+                    topics=result.get("topics", [])
                 )
                 chunks.append(chunk)
 

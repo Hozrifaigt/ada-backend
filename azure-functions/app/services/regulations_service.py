@@ -27,21 +27,6 @@ class RegulationsService:
         r'Article\s+\((\d+[A-Za-z]?)\)',  # Article (15)
     ]
 
-    CHAPTER_PATTERNS = [
-        r'Chapter\s+(\d+[:\s]+.*?)(?:\n|$)',  # Chapter 3: Employment Contracts
-        r'CHAPTER\s+(\d+[:\s]+.*?)(?:\n|$)',
-        r'Section\s+(\d+[:\s]+.*?)(?:\n|$)',  # Section 5: Leave Entitlements
-    ]
-
-    # Patterns for detecting cross-references
-    REFERENCE_PATTERNS = [
-        r'subject to Article\s+(\d+)',
-        r'as per provisions of Article\s+(\d+)',
-        r'in accordance with Article\s+(\d+)',
-        r'notwithstanding Article\s+(\d+)',
-        r'pursuant to Article\s+(\d+)',
-        r'referred to in Article\s+(\d+)',
-    ]
 
     def __init__(self):
         """Initialize the regulations service."""
@@ -74,6 +59,36 @@ class RegulationsService:
             full_text = "\n".join(text_content)
             logger.info(f"Extracted {len(full_text)} characters from {pdf_path}")
             return full_text
+
+        except Exception as e:
+            logger.error(f"Error extracting text from {pdf_path}: {e}")
+            raise
+
+    def extract_text_with_pages(self, pdf_path: str) -> List[Tuple[int, str]]:
+        """
+        Extract English text from a PDF file with page numbers.
+
+        Args:
+            pdf_path: Path to the PDF file
+
+        Returns:
+            List of tuples (page_number, text_content)
+        """
+        if pdfplumber is None:
+            raise ImportError("pdfplumber is required for PDF extraction. Install with: pip install pdfplumber")
+
+        try:
+            pages_content = []
+            with pdfplumber.open(pdf_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text()
+                    if text:
+                        filtered_text = self._filter_english_only(text)
+                        pages_content.append((page_num, filtered_text))
+
+            total_chars = sum(len(text) for _, text in pages_content)
+            logger.info(f"Extracted {total_chars} characters from {len(pages_content)} pages in {pdf_path}")
+            return pages_content
 
         except Exception as e:
             logger.error(f"Error extracting text from {pdf_path}: {e}")
@@ -117,57 +132,13 @@ class RegulationsService:
         logger.info(f"Detected {len(articles)} articles in text")
         return articles
 
-    def detect_chapters(self, text: str) -> List[Dict[str, any]]:
-        """
-        Detect chapter/section boundaries in the text.
-
-        Args:
-            text: The regulation text
-
-        Returns:
-            List of dictionaries with chapter information
-        """
-        chapters = []
-        lines = text.split('\n')
-
-        for i, line in enumerate(lines):
-            for pattern in self.CHAPTER_PATTERNS:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    chapters.append({
-                        'chapter_title': match.group(0).strip(),
-                        'line_number': i
-                    })
-                    break
-
-        logger.info(f"Detected {len(chapters)} chapters in text")
-        return chapters
-
-    def extract_cross_references(self, text: str) -> List[str]:
-        """
-        Extract article cross-references from text.
-
-        Args:
-            text: The article text
-
-        Returns:
-            List of referenced article numbers
-        """
-        references = set()
-
-        for pattern in self.REFERENCE_PATTERNS:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                references.add(f"Article {match}")
-
-        return list(references)
-
     def create_chunks(
         self,
         text: str,
         regulation_metadata: RegulationMetadata,
         chunk_size: int = 800,
-        overlap: int = 100
+        overlap: int = 100,
+        pages_content: Optional[List[Tuple[int, str]]] = None
     ) -> List[RegulationChunk]:
         """
         Create intelligent chunks from regulation text.
@@ -179,13 +150,16 @@ class RegulationsService:
             regulation_metadata: Metadata about the regulation
             chunk_size: Target chunk size in tokens (approximate by words)
             overlap: Overlap between chunks in tokens
+            pages_content: Optional list of (page_number, text) tuples for page tracking
 
         Returns:
             List of RegulationChunk objects
         """
         articles = self.detect_articles(text)
-        chapters = self.detect_chapters(text)
         lines = text.split('\n')
+
+        # Build a mapping of line numbers to page numbers
+        line_to_page = self._build_line_to_page_map(pages_content) if pages_content else {}
 
         chunks = []
 
@@ -193,9 +167,6 @@ class RegulationsService:
         if not articles:
             logger.warning("No articles detected, using simple chunking")
             return self._simple_chunk(text, regulation_metadata, chunk_size, overlap)
-
-        # Find the current chapter for each article
-        article_chapters = self._map_articles_to_chapters(articles, chapters)
 
         # Process each article
         for i, article in enumerate(articles):
@@ -211,12 +182,14 @@ class RegulationsService:
             article_lines = lines[start_line:end_line]
             article_text = '\n'.join(article_lines).strip()
 
-            # Skip if too short
-            if len(article_text) < 50:
+            # Skip if too short (less than 20 words)
+            word_count = len(article_text.split())
+            if word_count < 20:
+                logger.debug(f"Skipping short chunk ({word_count} words): {article_text[:50]}...")
                 continue
 
-            # Approximate token count (1 token ≈ 0.75 words)
-            word_count = len(article_text.split())
+            # Get page number for this article
+            page_number = line_to_page.get(start_line)
 
             # If article fits in one chunk, create single chunk
             if word_count <= chunk_size:
@@ -224,7 +197,7 @@ class RegulationsService:
                     content=article_text,
                     regulation_metadata=regulation_metadata,
                     article_number=article['article_number'],
-                    chapter=article_chapters.get(i)
+                    page_number=page_number
                 )
                 chunks.append(chunk)
             else:
@@ -233,48 +206,45 @@ class RegulationsService:
                     article_text,
                     article['article_number'],
                     regulation_metadata,
-                    article_chapters.get(i),
                     chunk_size,
-                    overlap
+                    overlap,
+                    page_number=page_number
                 )
                 chunks.extend(sub_chunks)
 
         logger.info(f"Created {len(chunks)} chunks from {len(articles)} articles")
         return chunks
 
-    def _map_articles_to_chapters(
-        self,
-        articles: List[Dict],
-        chapters: List[Dict]
-    ) -> Dict[int, str]:
-        """Map each article to its chapter."""
-        article_to_chapter = {}
+    def _build_line_to_page_map(self, pages_content: List[Tuple[int, str]]) -> Dict[int, int]:
+        """
+        Build a mapping from line numbers to page numbers.
 
-        for i, article in enumerate(articles):
-            article_line = article['line_number']
+        Args:
+            pages_content: List of (page_number, text) tuples
 
-            # Find the most recent chapter before this article
-            current_chapter = None
-            for chapter in reversed(chapters):
-                if chapter['line_number'] < article_line:
-                    current_chapter = chapter['chapter_title']
-                    break
+        Returns:
+            Dictionary mapping line number to page number
+        """
+        line_to_page = {}
+        current_line = 0
 
-            if current_chapter:
-                article_to_chapter[i] = current_chapter
+        for page_num, page_text in pages_content:
+            page_lines = page_text.split('\n')
+            for _ in page_lines:
+                line_to_page[current_line] = page_num
+                current_line += 1
 
-        return article_to_chapter
+        return line_to_page
 
     def _create_chunk(
         self,
         content: str,
         regulation_metadata: RegulationMetadata,
         article_number: Optional[str] = None,
-        chapter: Optional[str] = None
+        page_number: Optional[int] = None
     ) -> RegulationChunk:
         """Create a single regulation chunk."""
         chunk_id = str(uuid.uuid4())
-        references = self.extract_cross_references(content)
 
         # Auto-tag topics based on keywords
         topics = self._extract_topics(content)
@@ -285,12 +255,10 @@ class RegulationsService:
             regulation_category=regulation_metadata.regulation_category,
             decree_name=regulation_metadata.decree_name,
             article_number=article_number,
-            chapter=chapter,
             regulation_type=regulation_metadata.regulation_type,
             effective_date=regulation_metadata.effective_date,
-            superseded_by=regulation_metadata.superseded_by,
             topics=topics,
-            references=references
+            page_number=page_number
         )
 
     def _split_large_article(
@@ -298,9 +266,9 @@ class RegulationsService:
         article_text: str,
         article_number: str,
         regulation_metadata: RegulationMetadata,
-        chapter: Optional[str],
         chunk_size: int,
-        overlap: int
+        overlap: int,
+        page_number: Optional[int] = None
     ) -> List[RegulationChunk]:
         """Split a large article into multiple overlapping chunks."""
         words = article_text.split()
@@ -322,7 +290,7 @@ class RegulationsService:
                 content=chunk_text,
                 regulation_metadata=regulation_metadata,
                 article_number=f"{article_number} (Part {part_num})",
-                chapter=chapter
+                page_number=page_number
             )
             chunks.append(chunk)
 
@@ -353,8 +321,7 @@ class RegulationsService:
             chunk = self._create_chunk(
                 content=chunk_text,
                 regulation_metadata=regulation_metadata,
-                article_number=f"Section {chunk_num}",
-                chapter=None
+                article_number=f"Section {chunk_num}"
             )
             chunks.append(chunk)
 
