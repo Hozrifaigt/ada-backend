@@ -138,7 +138,6 @@ adapt_existing_content:
     Title: {document_title}
     Description: {document_description}
     Function: {function}
-    Policy Type: {policy_type}
     Industry: {industry}
     Client-Specific Requests: {client_specific_requests}
     Sector-Specific Comments: {sector_specific_comments}
@@ -213,7 +212,6 @@ generate_with_references:
     Title: {document_title}
     Description: {document_description}
     Function: {function}
-    Policy Type: {policy_type}
     Industry: {industry}
     Client-Specific Requests: {client_specific_requests}
     Sector-Specific Comments: {sector_specific_comments}
@@ -292,7 +290,6 @@ generate_from_scratch:
     Title: {document_title}
     Description: {document_description}
     Function: {function}
-    Policy Type: {policy_type}
     Industry: {industry}
     Client-Specific Requests: {client_specific_requests}
     Sector-Specific Comments: {sector_specific_comments}
@@ -415,7 +412,6 @@ generate_toc_from_description:
     - Title: {title}
     - Description: {description}
     - Function: {function}
-    - Policy Type: {policy_type}
     - Industry: {industry}
     - Company: {company_name}
     - Location: {city}, {country}
@@ -571,7 +567,6 @@ suggest_toc_topics:
     - Title: {draft_title}
     - Description: {draft_description}
     - Function: {function}
-    - Policy Type: {policy_type}
     - Industry: {industry}
     - Location: {city}, {country}
     - Client-Specific Requests: {client_specific_requests}

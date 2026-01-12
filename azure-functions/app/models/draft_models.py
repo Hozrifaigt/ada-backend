@@ -13,12 +13,11 @@ class ClientMetadata(BaseModel):
 
 
 class InitializeDraftRequest(BaseModel):
-    """Request to initialize a new draft from description or template."""
+    """Request to initialize a new draft from description."""
     title: str = Field(..., min_length=1, max_length=200, description="Draft title")
     description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
     function: str = Field(..., description="Function category (e.g., 'HR')")
-    policy_type: str = Field(..., description="Policy type (e.g., 'Remote Work Policy')")
     client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
     sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
     regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
@@ -36,7 +35,6 @@ class UpdateDraftMetadataRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
     function: str = Field(..., description="Function category (e.g., 'HR')")
-    policy_type: str = Field(..., description="Policy type (e.g., 'Remote Work Policy')")
     client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
     sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
     regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
@@ -65,7 +63,6 @@ class ValidateDraftRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
     function: str = Field(..., description="Function category (e.g., 'HR')")
-    policy_type: str = Field(..., description="Policy type (e.g., 'Remote Work Policy')")
     client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
     sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
     regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
@@ -107,7 +104,6 @@ class DraftSummary(BaseModel):
     most_similar_policy_id: Optional[str] = None
     client_metadata: Optional[Dict[str, str]] = None
     function: Optional[str] = None
-    policy_type: Optional[str] = None
 
 
 class DraftListResponse(BaseModel):
@@ -213,9 +209,8 @@ class DraftMetadata(BaseModel):
     modified_at: str
     client_metadata: ClientMetadata
     function: str
-    policy_type: str
     most_similar_policy_id: Optional[str] = None
-    toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
+    toc_source: Optional[str] = Field(default="ai_generated", description="Source of TOC: ai_generated")
     client_specific_requests: Optional[str] = Field(None, description="Client-specific requirements")
     sector_specific_comments: Optional[str] = Field(None, description="Sector-specific comments")
     regulations: str = Field(default="", description="Applicable regulation")

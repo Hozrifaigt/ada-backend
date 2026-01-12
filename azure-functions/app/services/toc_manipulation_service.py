@@ -808,7 +808,6 @@ class TOCManipulationService:
                 draft_title=draft_context.get('title', 'Policy Document'),
                 draft_description=draft_context.get('description', ''),
                 function=draft_context.get('function', ''),
-                policy_type=draft_context.get('policy_type', ''),
                 industry=draft_context.get('industry', ''),
                 city=draft_context.get('city', ''),
                 country=draft_context.get('country', ''),

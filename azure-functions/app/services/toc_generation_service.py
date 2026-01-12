@@ -25,7 +25,6 @@ class TOCGenerationService:
         title: str,
         client_metadata: ClientMetadata,
         function: str = "",
-        policy_type: str = "",
         client_specific_requests: Optional[str] = None,
         sector_specific_comments: Optional[str] = None,
         regulations: str = "",
@@ -40,6 +39,7 @@ class TOCGenerationService:
             description: Policy description provided by user (optional)
             title: Policy title
             client_metadata: Client information (industry, location, etc.)
+            function: Function category (e.g., 'HR')
             client_specific_requests: Client-specific requirements (optional)
             sector_specific_comments: Sector-specific considerations (optional)
             regulations: Applicable regulations
@@ -71,7 +71,6 @@ class TOCGenerationService:
                 title=title,
                 description=description or "",
                 function=function or "",
-                policy_type=policy_type or "",
                 industry=client_metadata.industry,
                 country=client_metadata.country,
                 city=client_metadata.city,
