@@ -325,12 +325,12 @@ class ContentGenerationService:
             # Build search query from topic title and policy type
             # Note: user_prompt is excluded as it's often generic (e.g., "generate content for this topic")
             # policy_type is more descriptive (e.g., "Leave Policy", "Termination Policy")
-            query_text = f"{topic_title} {draft_metadata.policy_type}"
+            query_text = f"{topic_title} {draft_metadata.effective_policy_type}"
 
             # Build context for better search
             context = {
                 "industry": draft_metadata.client_metadata.industry,
-                "policy_type": draft_metadata.policy_type,
+                "policy_type": draft_metadata.effective_policy_type,
                 "function": draft_metadata.function,
                 "client_requests": draft_metadata.client_specific_requests or "",
                 "sector_comments": draft_metadata.sector_specific_comments or ""
@@ -460,7 +460,7 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             document_title=draft.metadata.title,
             document_description=draft.metadata.description or "",
             function=draft.metadata.function,
-            policy_type=draft.metadata.policy_type,
+            policy_type=draft.metadata.effective_policy_type,
             industry=draft.metadata.client_metadata.industry,
             client_specific_requests=draft.metadata.client_specific_requests or "",
             sector_specific_comments=draft.metadata.sector_specific_comments or "",
@@ -506,7 +506,7 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             document_title=draft_metadata.title,
             document_description=draft_metadata.description or "",
             function=draft_metadata.function,
-            policy_type=draft_metadata.policy_type,
+            policy_type=draft_metadata.effective_policy_type,
             industry=draft_metadata.client_metadata.industry,
             client_specific_requests=draft_metadata.client_specific_requests or "",
             sector_specific_comments=draft_metadata.sector_specific_comments or "",
@@ -547,7 +547,7 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             document_title=draft_metadata.title,
             document_description=draft_metadata.description or "",
             function=draft_metadata.function,
-            policy_type=draft_metadata.policy_type,
+            policy_type=draft_metadata.effective_policy_type,
             industry=draft_metadata.client_metadata.industry,
             client_specific_requests=draft_metadata.client_specific_requests or "",
             sector_specific_comments=draft_metadata.sector_specific_comments or "",

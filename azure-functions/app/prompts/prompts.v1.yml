@@ -404,6 +404,68 @@ classify_query:
     REASON: [brief explanation]
     SHOULD_PROCEED: [true/false]
 
+generate_toc:
+  template: |
+    You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
+
+    POLICY CONTEXT:
+    - Title: {title}
+    - Function: {function}
+    - Industry: {industry}
+    - Company: {company_name}
+    - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, adjust the TOC structure:
+
+    | Detail Level | TOC Approach |
+    |--------------|--------------|
+    | Light (1-2) | Fewer main topics (3-5), focus on high-level principles and outcomes |
+    | Moderate (3) | Balanced structure (4-6 main topics), mix of principles and procedures |
+    | Heavy (4-5) | More comprehensive topics (6-8), detailed procedures and step-by-step guides |
+
+    Apply the detail level ({detail_level}) to determine:
+    - The number and granularity of topics and subtopics
+    - Whether to focus on principles (light) or procedures (heavy)
+    - The depth of breakdown needed for each section
+
+    TASK:
+    Generate a well-structured Table of Contents for a "{title}" policy document. The TOC should:
+    1. Be specific to the {industry} industry and appropriate for a {title}
+    2. Follow best practices for {country} regulations and standards
+    3. Consider the applicable regulations: {regulations}
+    4. Incorporate client-specific requests: {client_specific_requests}
+    5. Consider sector-specific comments: {sector_specific_comments}
+    6. Align with the detail level ({detail_level}) as outlined in the guidance above
+    7. Include {max_topics} main topics maximum
+    8. Include up to {max_subtopics} subtopics per main topic
+
+    Consider:
+    - What sections are typically needed for a {title}
+    - Industry-specific compliance requirements for {industry}
+    - Local regulations in {country}
+    - Common organizational needs
+    - The function area: {function}
+
+    IMPORTANT: Return the TOC as a JSON array with the following structure:
+    [
+      {{
+        "topic": "Main Topic Title",
+        "subtopics": [
+          {{"topic": "Subtopic 1 Title"}},
+          {{"topic": "Subtopic 2 Title"}}
+        ]
+      }}
+    ]
+
+    Return ONLY the JSON array, no additional text or explanation.
+
+    JSON TOC:
+
 generate_toc_from_description:
   template: |
     You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
