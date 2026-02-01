@@ -562,6 +562,7 @@ parse_toc_modification:
     Use other actions (add_topic, remove_topic, etc.) when the user gives specific instructions to modify the TOC directly.
 
     Possible actions include:
+    - chat_response: Respond conversationally to questions, comments, or discussion about the TOC
     - suggest_topics: Suggest new topics/subtopics based on user requirements
     - add_topic: Add a new main topic
     - add_subtopic: Add a subtopic to an existing topic
@@ -582,6 +583,7 @@ parse_toc_modification:
       "action": "action_type",
       "parameters": {{
         // action-specific parameters
+        // For chat_response: "message" (your conversational response)
         // For suggest_topics: "query", "context", "num_suggestions" (optional, default 5)
         // For add_topic: "title", "position", "subtopics" (optional array)
         // For add_subtopic: "topic_id", "topic_name", "title", "position"
@@ -607,7 +609,14 @@ parse_toc_modification:
     - merge_topics (combining content)
     - Any operation where the user might want to preview changes
 
-    If the command is unclear or ambiguous, set action to "clarification_needed" and include a follow_up_question.
+    If the user is asking a question about the TOC, making a comment, requesting feedback, or wants to discuss the document structure (rather than directly modify it), use action "chat_response" with a "message" parameter containing your helpful, conversational response. You should analyze the current TOC and provide thoughtful answers. Examples:
+    - "What do you think of the current TOC?" → chat_response with your analysis
+    - "Is this TOC comprehensive enough?" → chat_response with your assessment
+    - "What topics are missing?" → chat_response (or suggest_topics if they want additions)
+    - "Explain topic 3" → chat_response with explanation
+    - General greetings or thanks → chat_response
+
+    If the command is unclear or ambiguous regarding a modification, set action to "clarification_needed" and include a follow_up_question.
 
     Use the IDs from the current TOC when available. If the user refers to topics by name, include both the name and try to match it to the ID.
     For remove operations, always include both topic_id (if found) and topic_name to ensure proper matching.

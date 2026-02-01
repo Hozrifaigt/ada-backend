@@ -228,6 +228,10 @@ class CompleteDraft(BaseModel):
     id: str = Field(..., default_factory=lambda: str(uuid.uuid4()))
     metadata: DraftMetadata
     toc: List[TOCTopic]
+    toc_chat_history: List[ConversationEntry] = Field(
+        default_factory=list,
+        description="Conversation history for TOC chat assistant"
+    )
 
 # Update forward references
 TOCTopic.model_rebuild()

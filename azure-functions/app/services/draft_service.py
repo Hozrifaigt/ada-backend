@@ -552,6 +552,26 @@ class DraftService:
             return False
     
     
+    def update_toc_chat_history(self, draft_id: str, conversation_history: List[Dict[str, Any]]) -> bool:
+        """Update the TOC chat conversation history for a draft."""
+        try:
+            draft_model = self.storage.get_draft(draft_id)
+            if not draft_model:
+                logger.error(f"Draft {draft_id} not found for TOC chat history update")
+                return False
+
+            from app.models.draft_models import ConversationEntry
+            entries = [ConversationEntry(**entry) for entry in conversation_history]
+            draft_model.toc_chat_history = entries
+
+            success = self.storage.update_draft(draft_id, draft_model)
+            if success:
+                logger.info(f"Updated TOC chat history for draft {draft_id} with {len(entries)} entries")
+            return success
+        except Exception as e:
+            logger.error(f"Failed to update TOC chat history for draft {draft_id}: {e}")
+            return False
+
     def get_draft(self, draft_id: str) -> Optional[Dict[str, Any]]:
         """Get a complete draft by ID."""
         draft_model = self.storage.get_draft(draft_id)

@@ -699,6 +699,18 @@ async def chat_modify_toc(
                 follow_up_question=None
             )
 
+        # Handle conversational responses
+        if parsed_operation.get('action') == 'chat_response':
+            chat_msg = parsed_operation.get('parameters', {}).get('message', '') or parsed_operation.get('interpretation', '')
+            return TOCChatResponse(
+                success=True,
+                operation=None,
+                preview_toc=None,
+                current_toc=draft.get('toc', []),
+                message=chat_msg,
+                follow_up_question=parsed_operation.get('follow_up_question')
+            )
+
         # Check if clarification is needed
         if parsed_operation.get('action') == 'clarification_needed':
             return TOCChatResponse(
@@ -914,6 +926,25 @@ async def confirm_toc_modification(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to apply TOC modification: {str(e)}"
         )
+
+
+@router.put("/{draft_id}/toc/chat-history")
+async def update_toc_chat_history(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Save the TOC chat conversation history."""
+    logger.info(f"Updating TOC chat history for draft {draft_id} by user: {current_user.get('email')}")
+    conversation_history = request.get("conversation_history", [])
+    success = draft_service.update_toc_chat_history(draft_id, conversation_history)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save TOC chat history"
+        )
+    return {"success": True}
 
 
 # Template endpoint removed - no longer using Excel templates
