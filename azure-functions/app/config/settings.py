@@ -10,9 +10,11 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_VERSION: str = "2025-01-01-preview"
     AZURE_OPENAI_EMBEDDING_DIMENSIONS: int = 1536
 
+
     AZURE_SEARCH_ENDPOINT: str
     AZURE_SEARCH_KEY: str
     AZURE_SEARCH_INDEX_NAME: str
+    AZURE_SEARCH_REGULATIONS_INDEX_NAME: str = "regulations"
 
     AZURE_STORAGE_CONNECTION_STRING: str
     AZURE_STORAGE_CONTAINER_NAME: str
@@ -37,6 +39,18 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = 12
     LLM_CHUNK_SIZE: int = 10000
     LLM_CHUNK_OVERLAP: int = 300
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # Regulations path - defaults to Docker path, can be overridden
+    REGULATIONS_PATH: str = "/code/app/regulations"
+
+    # Regulation Search Settings
+    REGULATION_SEARCH_MIN_SCORE: float = 0.55
+    REGULATION_SEARCH_TOP_K: int = 5
+
+    # Rate Limiting Settings
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 60  # Max requests per minute per user (across all endpoints)
+    RATE_LIMIT_PER_HOUR: int = 1000  # Max requests per hour per user (across all endpoints)
 
 settings = Settings()

@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from app.config.settings import settings
 from app.pipelines.components.embedder import AzureEmbedder
+from app.models.regulation_models import RegulationChunk
 
 from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
@@ -28,25 +29,89 @@ class UploadResult:
 
 class AzureVectorStore:
     """Simplified Azure AI Search store - vectors only for policy descriptions."""
-    
+
     def __init__(self, embedder: AzureEmbedder):
         self.index_name = settings.AZURE_SEARCH_INDEX_NAME
+        self.regulations_index_name = settings.AZURE_SEARCH_REGULATIONS_INDEX_NAME
         self.embedder = embedder
-        
+        self.llm_service = None
+
         logger.info(f"Initializing Simplified AzureVectorStore:")
         logger.info(f"Endpoint: {settings.AZURE_SEARCH_ENDPOINT}")
-        logger.info(f"Index: {self.index_name}")
+        logger.info(f"Policies Index: {self.index_name}")
+        logger.info(f"Regulations Index: {self.regulations_index_name}")
         
+        # Initialize LLM service for synonym expansion
         try:
+            from app.pipelines.components.llm import AzureLLM
+            from app.prompts.manager import PromptManager
+            self.llm_service = AzureLLM(prompt_manager=PromptManager(settings.PROMPT_MANAGER_PATH))
+            logger.info("LLM service initialized for synonym expansion")
+        except Exception as e:
+            logger.warning(f"Could not initialize LLM service for synonym expansion: {e}")
+
+        try:
+            # Client for policies and topics
             self.search_client = SearchClient(
                 endpoint=settings.AZURE_SEARCH_ENDPOINT,
                 index_name=self.index_name,
                 credential=AzureKeyCredential(settings.AZURE_SEARCH_KEY)
             )
-            logger.info("Simplified AzureVectorStore initialized (vectors for policies only)")
+
+            # Separate client for regulations
+            self.regulations_client = SearchClient(
+                endpoint=settings.AZURE_SEARCH_ENDPOINT,
+                index_name=self.regulations_index_name,
+                credential=AzureKeyCredential(settings.AZURE_SEARCH_KEY)
+            )
+            logger.info("AzureVectorStore initialized with separate regulations index")
         except Exception as e:
             logger.error(f"Failed to initialize AzureVectorStore: {e}")
             raise
+    
+    async def _expand_synonyms(self, topic: str) -> List[str]:
+        """
+        Expand a topic with synonyms using LLM for better search coverage.
+        
+        Args:
+            topic: The main topic to expand
+            
+        Returns:
+            List of synonyms and variations (includes original topic)
+        """
+        synonyms = [topic]  # Always include original
+        
+        if not self.llm_service:
+            logger.debug(f"LLM service unavailable, returning original topic: {topic}")
+            return synonyms
+        
+        try:
+            prompt = f"""You are helping expand search queries for UAE labor regulations.
+
+Given the topic: {topic}
+
+Provide 4-5 relevant synonyms or variations that a user might use when searching for this concept.
+Include common abbreviations, related terms, and different phrasings.
+
+Return ONLY a JSON array of strings, no other text.
+Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
+            
+            response = await self.llm_service.generate(prompt)
+            
+            # Parse JSON response
+            import json
+            expanded = json.loads(response)
+            
+            if isinstance(expanded, list):
+                # Deduplicate and combine with original
+                synonyms.extend([s for s in expanded if s.lower() != topic.lower()])
+                synonyms = list(dict.fromkeys(synonyms))  # Preserve order, remove duplicates
+                logger.debug(f"Expanded '{topic}' to synonyms: {synonyms}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to expand synonyms for '{topic}': {e}. Using original only.")
+        
+        return synonyms
     
     def _create_base_document(self, doc_id: Optional[str] = None) -> Dict[str, Any]:
         """Create base document structure with required fields."""
@@ -223,10 +288,15 @@ class AzureVectorStore:
             for i, result in enumerate(results):
                 # Parse TOC JSON
                 toc = json.loads(result.get("toc", "[]"))
-                
-                # Calculate similarity score (rank-based for simplicity)
-                similarity_score = max(95 - (i * 10), 10) / 100
-                
+
+                # Get the actual similarity score from Azure Search
+                # Azure returns scores as @search.score, which is accessible as a property
+                actual_score = getattr(result, '@search.score', 0.0)
+
+                # Normalize the score to 0-1 range if needed
+                # Azure Search scores can vary, but cosine similarity should already be 0-1
+                similarity_score = min(actual_score, 1.0)  # Cap at 1.0 just in case
+
                 if similarity_score >= threshold:
                     processed_results.append({
                         "id": result["id"],
@@ -271,8 +341,13 @@ class AzureVectorStore:
                 # Parse subtopics JSON
                 subtopics = json.loads(result.get("subtopics", "[]"))
 
-                # Calculate similarity score (rank-based for simplicity)
-                similarity_score = max(95 - (i * 10), 10) / 100
+                # Get the actual similarity score from Azure Search
+                # Azure returns scores as @search.score, which is accessible as a property
+                actual_score = getattr(result, '@search.score', 0.0)
+
+                # Normalize the score to 0-1 range if needed
+                # Azure Search scores can vary, but cosine similarity should already be 0-1
+                similarity_score = min(actual_score, 1.0)  # Cap at 1.0 just in case
 
                 if similarity_score >= threshold:
                     processed_results.append({
@@ -392,15 +467,249 @@ class AzureVectorStore:
                 select="id,filename,description,source,toc,topic_ids",
                 top=max_results
             )
-            
+
             policies = []
             for result in results:
                 # Parse TOC JSON
                 result["toc"] = json.loads(result.get("toc", "[]"))
                 policies.append(result)
-            
+
             return policies
-            
+
         except Exception as e:
             logger.error(f"Failed to retrieve all policies: {e}")
+            return []
+
+    # ============================================================
+    # REGULATIONS METHODS
+    # ============================================================
+
+    def _create_regulation_document(self, regulation_chunk: RegulationChunk) -> Dict[str, Any]:
+        """Create Azure Search document from RegulationChunk."""
+        return {
+            "id": regulation_chunk.id,
+            "record_type": "regulation",
+            "content": regulation_chunk.content,
+            "regulation_category": regulation_chunk.regulation_category,
+            "decree_name": regulation_chunk.decree_name,
+            "article_number": regulation_chunk.article_number or "",
+            "regulation_type": regulation_chunk.regulation_type,
+            "effective_date": regulation_chunk.effective_date or "",
+            "topics": regulation_chunk.topics,
+            # Vector will be added during indexing
+            "content_vector": []
+        }
+
+    def _upload_regulations_batch(self, documents: List[Dict[str, Any]]) -> UploadResult:
+        """Upload a batch of regulation documents using regulations client."""
+        try:
+            result = self.regulations_client.upload_documents(documents)
+
+            successful = sum(1 for item in result if item.succeeded)
+            failed = len(result) - successful
+
+            if failed > 0:
+                logger.error(f"Failed to upload {failed} regulation documents in batch")
+                for item in result:
+                    if not item.succeeded:
+                        logger.error(f"Upload error for doc {getattr(item, 'key', 'unknown')}: {item.error_message}")
+
+            return UploadResult(successful=successful, failed=failed, total=len(documents))
+
+        except AzureError as e:
+            logger.error(f"Azure error during regulation batch upload: {e}")
+            return UploadResult(successful=0, failed=len(documents), total=len(documents))
+        except Exception as e:
+            logger.error(f"Unexpected error during regulation batch upload: {e}")
+            return UploadResult(successful=0, failed=len(documents), total=len(documents))
+
+    async def index_regulations(self, chunks: List[RegulationChunk]) -> bool:
+        """
+        Index regulation chunks with embeddings in Azure Search.
+
+        Args:
+            chunks: List of RegulationChunk objects to index
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not chunks:
+            logger.warning("No regulation chunks to index")
+            return True
+
+        logger.info(f"Indexing {len(chunks)} regulation chunks into '{self.regulations_index_name}'")
+
+        try:
+            documents_to_upload = []
+
+            # Build enriched texts for embedding that include topics and metadata
+            # This creates powerful vectors that understand the semantic context
+            enriched_texts = []
+            for chunk in chunks:
+                # Concatenate topics + decree_name + article_number + content
+                # This way the embedding captures all semantic signals
+                topics_str = " ".join(chunk.topics) if chunk.topics else ""
+                article_ref = f"{chunk.article_number}" if chunk.article_number else ""
+                
+                enriched_text = f"{topics_str} | {chunk.decree_name} | {article_ref} | {chunk.content}"
+                enriched_texts.append(enriched_text)
+
+            # Generate embeddings in batch for better performance
+            logger.info(f"Generating enriched embeddings for {len(enriched_texts)} chunks (with topics + metadata)...")
+            embeddings = self.embedder.embed_documents(enriched_texts)
+            logger.info(f"Successfully generated {len(embeddings)} embeddings")
+
+            # Create search documents with embeddings
+            for chunk, embedding in zip(chunks, embeddings):
+                search_doc = self._create_regulation_document(chunk)
+                search_doc["content_vector"] = embedding
+                documents_to_upload.append(search_doc)
+
+            # Upload in batches using regulations client
+            batch_size = getattr(settings, 'BATCH_SIZE', 24)
+            total_result = UploadResult(successful=0, failed=0, total=len(documents_to_upload))
+
+            for i in range(0, len(documents_to_upload), batch_size):
+                batch = documents_to_upload[i:i + batch_size]
+                batch_result = self._upload_regulations_batch(batch)
+
+                total_result.successful += batch_result.successful
+                total_result.failed += batch_result.failed
+
+                logger.info(f"Batch {i // batch_size + 1} complete: {batch_result.successful} successful")
+
+            logger.info(f"Regulation indexing complete: {total_result.successful} successful, "
+                       f"{total_result.failed} failed")
+
+            return total_result.failed == 0
+
+        except Exception as e:
+            logger.error(f"Failed to index regulations: {e}")
+            return False
+
+    async def search_relevant_regulations(
+        self,
+        query_text: str,
+        regulation_name: Optional[str] = None,
+        top_k: int = None,
+        min_score: float = None,
+        context: Optional[Dict[str, Any]] = None
+    ) -> List[RegulationChunk]:
+        """
+        Search for relevant regulation chunks using simple keyword search.
+
+        Args:
+            query_text: The search query
+            regulation_name: Optional filter by regulation category
+            top_k: Number of results to return
+            min_score: Minimum similarity score threshold (not used, kept for compatibility)
+            context: Additional context (not used, kept for compatibility)
+
+        Returns:
+            List of RegulationChunk objects with relevance scores
+        """
+        if top_k is None:
+            top_k = settings.REGULATION_SEARCH_TOP_K
+
+        try:
+            logger.info(f"Searching regulations for: {query_text}")
+
+            # Generate embedding for semantic search
+            query_vector = self.embedder.embed_query(query_text)
+
+            from azure.search.documents.models import VectorizedQuery
+
+            vector_query = VectorizedQuery(
+                vector=query_vector,
+                k_nearest_neighbors=top_k,
+                fields="content_vector"
+            )
+
+            # Hybrid search: BM25 (keywords) + Vector (semantic)
+            results = self.regulations_client.search(
+                search_text=query_text,
+                search_fields=["topics", "content"],  # BM25 searches these
+                vector_queries=[vector_query],  # Vector searches content_vector
+                select="id,content,regulation_category,decree_name,article_number,regulation_type,effective_date,topics",
+                top=top_k
+            )
+
+            # Process results - Azure combines BM25 + vector scores
+            processed_results = []
+            for result in results:
+                score = result.get('@search.score', 0.0)
+
+                chunk = RegulationChunk(
+                    id=result["id"],
+                    content=result["content"],
+                    regulation_category=result["regulation_category"],
+                    decree_name=result["decree_name"],
+                    article_number=result.get("article_number", ""),
+                    regulation_type=result["regulation_type"],
+                    effective_date=result.get("effective_date"),
+                    topics=result.get("topics", []),
+                    score=score
+                )
+                processed_results.append(chunk)
+
+            logger.info(f"Found {len(processed_results)} regulation chunks (hybrid BM25 + vector)")
+
+            return processed_results
+
+        except Exception as e:
+            logger.error(f"Failed to search regulations: {e}")
+            return []
+
+    async def search_regulations_by_article(
+        self,
+        article_query: str,
+        regulation_name: Optional[str] = None
+    ) -> List[RegulationChunk]:
+        """
+        Search for specific articles by number or topic.
+
+        This is used when the user requests a specific article.
+
+        Args:
+            article_query: Article number or topic (e.g., "Article 15" or "leave entitlements")
+            regulation_name: Optional regulation name to filter by
+
+        Returns:
+            List of matching RegulationChunk objects
+        """
+        try:
+            filter_parts = ["record_type eq 'regulation'"]
+
+            if regulation_name:
+                filter_parts.append(f"regulation_category eq '{regulation_name}'")
+
+            filter_query = " and ".join(filter_parts)
+
+            # Use keyword search for article numbers
+            results = self.regulations_client.search(
+                search_text=article_query,
+                filter=filter_query,
+                select="id,content,regulation_category,decree_name,article_number,regulation_type,effective_date,topics",
+                top=10
+            )
+
+            chunks = []
+            for result in results:
+                chunk = RegulationChunk(
+                    id=result["id"],
+                    content=result["content"],
+                    regulation_category=result["regulation_category"],
+                    decree_name=result["decree_name"],
+                    article_number=result.get("article_number", ""),
+                    regulation_type=result["regulation_type"],
+                    effective_date=result.get("effective_date"),
+                    topics=result.get("topics", [])
+                )
+                chunks.append(chunk)
+
+            logger.info(f"Found {len(chunks)} articles matching '{article_query}'")
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Failed to search regulations by article: {e}")
             return []

@@ -15,13 +15,30 @@ class ClientMetadata(BaseModel):
 class InitializeDraftRequest(BaseModel):
     """Request to initialize a new draft from description."""
     title: str = Field(..., min_length=1, max_length=200, description="Draft title")
-    description: str = Field(..., min_length=1, max_length=2000, description="Policy description for RAG search")
+    description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
     client_metadata: ClientMetadata = Field(..., description="Client metadata")
+    function: str = Field(..., description="Function category (e.g., 'HR')")
+    client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
+    detail_level: int = Field(default=3, ge=1, le=5, description="Level of detail: 1 (light) to 5 (comprehensive)")
 
 
 class UpdateTOCRequest(BaseModel):
     """Request to update/finalize TOC structure."""
     toc: List[Dict[str, Any]] = Field(..., description="Table of contents structure")
+
+
+class UpdateDraftMetadataRequest(BaseModel):
+    """Request to update draft metadata."""
+    title: str = Field(..., min_length=1, max_length=200, description="Draft title")
+    description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
+    client_metadata: ClientMetadata = Field(..., description="Client metadata")
+    function: str = Field(..., description="Function category (e.g., 'HR')")
+    client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
+    detail_level: int = Field(default=3, ge=1, le=5, description="Level of detail: 1 (light) to 5 (comprehensive)")
 
 
 class GenerateContentRequest(BaseModel):
@@ -40,6 +57,18 @@ class UpdateContentRequest(BaseModel):
 
 
 
+class ValidateDraftRequest(BaseModel):
+    """Request to validate draft creation parameters."""
+    title: str = Field(..., min_length=1, max_length=200, description="Draft title")
+    description: Optional[str] = Field(None, max_length=2000, description="Policy description (optional)")
+    client_metadata: ClientMetadata = Field(..., description="Client metadata")
+    function: str = Field(..., description="Function category (e.g., 'HR')")
+    client_specific_requests: Optional[str] = Field(None, max_length=5000, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, max_length=5000, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation (e.g., 'UAE Labor Law')")
+    detail_level: int = Field(default=3, ge=1, le=5, description="Level of detail: 1 (light) to 5 (comprehensive)")
+
+
 class ExportRequest(BaseModel):
     """Request to export draft."""
     delete_after_export: bool = Field(default=True, description="Delete draft after successful export")
@@ -47,24 +76,34 @@ class ExportRequest(BaseModel):
 
 # ============= Response Models =============
 
+class ValidateDraftResponse(BaseModel):
+    """Response for draft validation."""
+    is_valid: bool = Field(..., description="Whether the draft parameters are valid")
+    issues: List[str] = Field(default=[], description="List of validation issues")
+    suggestions: List[str] = Field(default=[], description="Suggestions for improvement")
+    description_quality_score: int = Field(..., description="Quality score for description (0-100)")
+    improved_description: Optional[str] = Field(None, description="Suggested improved description")
+
 class InitializeDraftResponse(BaseModel):
     """Response after initializing a draft."""
     draft_id: str
     similar_policies_found: int
     suggested_toc: List[Dict[str, Any]]
     message: str
+    toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
 
 
 class DraftSummary(BaseModel):
     """Summary information for a draft (used in list)."""
     draft_id: str
     title: str
-    description: str
+    description: Optional[str] = None
     created_by: str
     created_at: str
     modified_at: str
     most_similar_policy_id: Optional[str] = None
     client_metadata: Optional[Dict[str, str]] = None
+    function: Optional[str] = None
 
 
 class DraftListResponse(BaseModel):
@@ -88,6 +127,19 @@ class TopicContext(BaseModel):
     current_topic_toc: Optional[Dict[str, Any]] = Field(None, description="Current topic TOC item")
 
 
+class CritiqueResponse(BaseModel):
+    """Reflection agent critique of generated content."""
+    score: float = Field(..., ge=0.0, le=1.0, description="Quality score 0-1")
+    alignment_score: float = Field(..., ge=0.0, le=1.0, description="Alignment with client requirements 0-1")
+    strengths: List[str] = Field(default_factory=list, description="Positive aspects of content")
+    weaknesses: List[str] = Field(default_factory=list, description="Areas for improvement")
+    improvements: List[str] = Field(default_factory=list, description="Specific improvements suggested")
+    compliance_gaps: List[str] = Field(default_factory=list, description="Regulatory or requirement gaps")
+    recommendations: str = Field(..., description="Comprehensive recommendations")
+    requires_revision: bool = Field(default=False, description="Whether content needs revision")
+    fixed_content: Optional[str] = Field(None, description="Auto-improved content if revision was performed")
+
+
 class ContentGenerationResponse(BaseModel):
     """Response after content generation."""
     content: str = Field(..., description="Generated content")
@@ -96,6 +148,7 @@ class ContentGenerationResponse(BaseModel):
     word_count: int = Field(default=0, description="Word count of generated content")
     message: str
     is_chat_response: bool = Field(default=False, description="True if this is a chat response, not actual policy content")
+    critique: Optional[CritiqueResponse] = Field(None, description="Reflection agent critique (if available)")
 
 
 # ============= Data Models (for internal use) =============
@@ -150,12 +203,24 @@ class Subtopic(BaseModel):
 class DraftMetadata(BaseModel):
     """Draft metadata."""
     title: str
-    description: str
+    description: Optional[str] = None
     created_by: str
     created_at: str
     modified_at: str
     client_metadata: ClientMetadata
+    function: str
     most_similar_policy_id: Optional[str] = None
+    toc_source: Optional[str] = Field(default="ai_generated", description="Source of TOC: ai_generated")
+    client_specific_requests: Optional[str] = Field(None, description="Client-specific requirements")
+    sector_specific_comments: Optional[str] = Field(None, description="Sector-specific comments")
+    regulations: str = Field(default="", description="Applicable regulation")
+    detail_level: int = Field(default=3, description="Level of detail: 1 (light) to 5 (comprehensive)")
+    policy_type: Optional[str] = Field(None, description="Policy type (e.g., 'Leave Policy'). Falls back to title if not set.")
+
+    @property
+    def effective_policy_type(self) -> str:
+        """Return policy_type if set, otherwise fall back to title."""
+        return self.policy_type or self.title
 
 
 class CompleteDraft(BaseModel):
@@ -163,6 +228,10 @@ class CompleteDraft(BaseModel):
     id: str = Field(..., default_factory=lambda: str(uuid.uuid4()))
     metadata: DraftMetadata
     toc: List[TOCTopic]
+    toc_chat_history: List[ConversationEntry] = Field(
+        default_factory=list,
+        description="Conversation history for TOC chat assistant"
+    )
 
 # Update forward references
 TOCTopic.model_rebuild()

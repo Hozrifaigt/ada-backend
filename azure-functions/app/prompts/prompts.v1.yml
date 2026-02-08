@@ -1,0 +1,699 @@
+summarize_document:
+  name: "Summarize Policy Document for Semantic Search"
+  version: 1.0
+  template: |
+    You are a helpful assistant who is an expert at analyzing legal and policy documents.
+    Analyze the following document text and write a single, dense, and comprehensive paragraph that captures its core meaning, intent, and key topics. This summary will be used to create a vector embedding for semantic search.
+    Focus on the most important themes, concepts, and implications of the text.
+    Avoid unnecessary details or examples, and do not include any personal opinions or interpretations.
+
+    TEXT:
+    {text}
+    
+    COMPREHENSIVE SUMMARY:
+
+generate_policy_content:
+  name: "Generate Policy Content"
+  version: 1.0
+  template: |
+    You are an AI assistant helping to generate policy content based on existing policy templates and user requirements.
+
+    EXISTING POLICY CONTENT FOR REFERENCE:
+    {topic_content}
+
+    USER REQUEST:
+    {user_query}
+
+    Please generate improved or customized policy content that addresses the user's request while building upon the existing policy content provided above. 
+    
+    Ensure the response is:
+    1. Professional and appropriate for policy documentation
+    2. Consistent with the structure and tone of the existing content
+    3. Responsive to the specific user request
+    4. Clear and actionable
+    5. Properly formatted with headers and bullet points where appropriate
+
+    GENERATED POLICY CONTENT:
+
+validate_draft_description:
+  name: "Validate Draft Description"
+  version: 1.0
+  template: |
+    You are an expert policy consultant evaluating whether a description is sufficient to create a meaningful policy document.
+
+    DESCRIPTION TO EVALUATE:
+    {description}
+
+    Evaluate this description and determine if it provides enough detail and clarity to generate a useful policy document.
+
+    Common BAD descriptions include:
+    - "n/a", "none", "N/A", "not applicable"
+    - "overall HR policy", "general policy", "company policy"
+    - Single words or very vague phrases
+    - Descriptions that don't specify what the policy should cover
+    - Generic statements without any specific requirements
+
+    GOOD descriptions should:
+    - Clearly state what the policy needs to address
+    - Mention specific areas, scenarios, or requirements
+    - Provide enough context to generate targeted content
+    - Be at least 15-20 words with meaningful content
+
+    Return your assessment as a JSON object with this EXACT structure:
+    {{
+      "is_valid": true or false,
+      "quality_score": number between 0 and 100,
+      "issues": ["list", "of", "specific", "issues"] or [],
+      "suggestions": ["list", "of", "improvement", "suggestions"] or [],
+      "improved_description": "A rewritten version that would be acceptable" or null
+    }}
+
+    Important:
+    - Set is_valid to FALSE if quality_score is below 50 (descriptions need at least 50 to be acceptable)
+    - Quality score should be 0-20 for terrible descriptions, 20-50 for poor, 50-70 for acceptable, 70-100 for good
+    - Set is_valid to false for descriptions like "n/a", "overall policy", or anything too vague
+    - Always provide specific, actionable suggestions if the description needs improvement
+    - Generate an improved_description if the current one scores below 60 to help users
+
+    Return ONLY the JSON object, no additional text or explanation.
+
+improve_draft_description:
+  name: "Improve Draft Description"
+  version: 1.0
+  template: |
+    You are an expert HR and policy consultant helping organizations create comprehensive policies.
+
+    The user has provided a low-quality description for a policy document they want to create.
+    Your task is to improve this description to be more specific, detailed, and actionable.
+
+    ORIGINAL DESCRIPTION: {original_description}
+    POLICY TITLE: {title}
+    ORGANIZATION INDUSTRY: {industry}
+    COMPANY NAME: {company_name}
+    LOCATION: {city}, {country}
+
+    Please create an improved description that:
+    1. Is specific about what the policy should cover
+    2. Mentions key areas and scenarios that should be addressed
+    3. Is relevant to the {industry} industry
+    4. Is at least 30-50 words long
+    5. Provides clear direction for policy content generation
+    6. Avoids generic statements like "overall policy" or "general guidelines"
+
+    Write the improved description in a professional tone, as if the client wrote it themselves.
+    Do not include any meta-commentary, just provide the improved description text.
+
+    IMPROVED DESCRIPTION:
+
+generate_from_empty:
+  name: "Generate Policy From Empty Topic"
+  version: 1.0
+  template: |
+    You are an AI assistant helping to generate policy content for a topic that has no existing content.
+
+    TOPIC: {topic_name}
+
+    USER REQUEST: {user_query}
+
+    Since there is no existing content for this topic, please generate comprehensive policy content based on:
+    1. The topic name and what it typically covers in organizational policies
+    2. Industry best practices and standards
+    3. Common regulatory requirements
+    4. The user's specific request
+
+    Ensure the response is:
+    1. Professional and appropriate for policy documentation
+    2. Comprehensive and well-structured
+    3. Based on common organizational needs
+    4. Clear and actionable
+    5. Properly formatted with headers and topics
+
+    GENERATED POLICY CONTENT:
+
+adapt_existing_content:
+  template: |
+    You are adapting an existing policy topic based on specific requirements.
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Description: {document_description}
+    Function: {function}
+    Industry: {industry}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+    | Guidance | Assumes employee judgment | Some guidance with flexibility | Explicit, detailed direction |
+    | Content | Principles and guidelines | Key procedures with rationale | Comprehensive rules and workflows |
+
+    Apply the detail level ({detail_level}) to determine:
+    - How prescriptive vs principle-based the content should be
+    - The length and granularity of procedures
+    - The balance between "what" and "how"
+    - The level of specific examples and scenarios to include
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
+
+    PREVIOUS TOPICS SUMMARY:
+    {previous_topics}
+
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    CRITICAL INSTRUCTIONS FOR REGULATION CITATIONS:
+    1. When referencing regulations, use INLINE CITATIONS with article numbers (e.g., "According to Article 15 of Federal Decree-Law No. 33 of 2021, ...")
+    2. ONLY cite regulations provided in the RELEVANT REGULATION SECTIONS above - do not make up article numbers
+    3. If multiple articles apply, cite all relevant ones
+    4. Ensure accuracy - article numbers must match the provided sections exactly
+    5. If no relevant regulation sections are found above, proceed with industry best practices without regulation citations
+
+    EXISTING CONTENT TO ADAPT:
+    {existing_content}
+
+    USER REQUIREMENTS:
+    {user_requirements}
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    INSTRUCTIONS:
+    1. Adapt the existing content to meet the user's specific requirements
+    2. Maintain consistency with previous topics and conversation history
+    3. Review the summaries in the TOC to avoid duplicating content already covered
+    4. Keep the professional tone and structure appropriate for the {industry} industry
+    5. Ensure the content flows naturally from previous topics
+    6. Consider the context from previous conversations
+    7. Build upon concepts introduced in completed topics without repeating them
+    8. Include industry-specific regulations and standards relevant to {industry}
+    9. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
+    10. IMPORTANT: When regulation sections are provided, cite them using inline citations as specified above
+    11. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    12. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    13. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+
+    ADAPTED CONTENT:
+
+generate_with_references:
+  template: |
+    You are creating a policy topic with reference to similar existing policies.
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Description: {document_description}
+    Function: {function}
+    Industry: {industry}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+    | Guidance | Assumes employee judgment | Some guidance with flexibility | Explicit, detailed direction |
+    | Content | Principles and guidelines | Key procedures with rationale | Comprehensive rules and workflows |
+
+    Apply the detail level ({detail_level}) to determine:
+    - How prescriptive vs principle-based the content should be
+    - The length and granularity of procedures
+    - The balance between "what" and "how"
+    - The level of specific examples and scenarios to include
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
+
+    TOPIC TO CREATE:
+    {topic_title}
+
+    USER REQUIREMENTS:
+    {user_requirements}
+
+    PREVIOUS TOPICS SUMMARY:
+    {previous_topics}
+
+    SIMILAR TOPICS FROM KNOWLEDGE BASE:
+    {similar_topics}
+
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    CRITICAL INSTRUCTIONS FOR REGULATION CITATIONS:
+    1. When referencing regulations, use INLINE CITATIONS with article numbers (e.g., "According to Article 15 of Federal Decree-Law No. 33 of 2021, ...")
+    2. ONLY cite regulations provided in the RELEVANT REGULATION SECTIONS above - do not make up article numbers
+    3. If multiple articles apply, cite all relevant ones
+    4. Ensure accuracy - article numbers must match the provided sections exactly
+    5. If no relevant regulation sections are found above, proceed with industry best practices without regulation citations
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    INSTRUCTIONS:
+    1. Create comprehensive content for "{topic_title}" based on the user requirements
+    2. Use the similar topics as reference but adapt to the specific context
+    3. Do not copy content verbatim - create original content
+    4. Review the summaries in the TOC to avoid duplicating content already covered
+    5. Maintain professional policy language appropriate for the {industry} industry
+    6. Include specific details relevant to the organization's context and industry
+    7. Consider the context from previous conversations
+    8. Reference or build upon completed topics when relevant without repeating their content
+    9. Consider industry-specific regulations, standards, and best practices for {industry}
+    10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
+    11. IMPORTANT: When regulation sections are provided, cite them using inline citations as specified above
+    12. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    13. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    14. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+
+    CONTENT:
+
+generate_from_scratch:
+  template: |
+    You are creating a new policy topic from scratch.
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Description: {document_description}
+    Function: {function}
+    Industry: {industry}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+    | Guidance | Assumes employee judgment | Some guidance with flexibility | Explicit, detailed direction |
+    | Content | Principles and guidelines | Key procedures with rationale | Comprehensive rules and workflows |
+
+    Apply the detail level ({detail_level}) to determine:
+    - How prescriptive vs principle-based the content should be
+    - The length and granularity of procedures
+    - The balance between "what" and "how"
+    - The level of specific examples and scenarios to include
+
+    {topic_structure_guidance}
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
+
+    TOPIC TO CREATE:
+    {topic_title}
+
+    USER REQUIREMENTS:
+    {user_requirements}
+
+    PREVIOUS TOPICS SUMMARY:
+    {previous_topics}
+
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    CRITICAL INSTRUCTIONS FOR REGULATION CITATIONS:
+    1. When referencing regulations, use INLINE CITATIONS with article numbers (e.g., "According to Article 15 of Federal Decree-Law No. 33 of 2021, ...")
+    2. ONLY cite regulations provided in the RELEVANT REGULATION SECTIONS above - do not make up article numbers
+    3. If multiple articles apply, cite all relevant ones
+    4. Ensure accuracy - article numbers must match the provided sections exactly
+    5. If no relevant regulation sections are found above, proceed with industry best practices without regulation citations
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    INSTRUCTIONS:
+    1. Create comprehensive content for "{topic_title}" based on the user requirements
+    2. Since no existing references are available, use best practices and standards for the {industry} industry
+    3. Review the summaries in the TOC to ensure consistency with completed topics
+    4. Do not repeat information already covered - reference it if needed
+    5. Maintain professional policy language appropriate for {industry}
+    6. Include specific actionable guidelines relevant to the industry
+    7. Consider the context from previous conversations
+    8. Build a cohesive policy by connecting to previously established concepts
+    9. Apply industry-specific requirements and compliance needs for {industry}
+    10. IMPORTANT: Ensure all content complies with the applicable regulations: {regulations}
+    11. IMPORTANT: When regulation sections are provided, cite them using inline citations as specified above
+    12. IMPORTANT: Address the client-specific requests: {client_specific_requests}
+    13. IMPORTANT: If sector-specific comments are provided, incorporate them: {sector_specific_comments}
+    14. IMPORTANT: Follow the detail level specification ({detail_level}) as outlined in the guidance table above
+    15. IMPORTANT: If TOPIC STRUCTURE GUIDANCE is provided above, follow it carefully to ensure proper content depth
+
+    CONTENT:
+
+generate_summary:
+  template: |
+    Create a concise summary of the following policy topic.
+
+    TOPIC TITLE: {topic_title}
+
+    CONTENT:
+    {content}
+
+    INSTRUCTIONS:
+    1. Summarize in 100-120 words
+    2. Capture the key points and requirements
+    3. Maintain the essential information
+    4. Use clear, professional language
+
+    SUMMARY:
+
+classify_query:
+  template: |
+    You are a content filter for a policy document generation system. Your job is to determine if a user's request is legitimate for generating policy content.
+
+    DOCUMENT CONTEXT:
+    - Document: {document_title}
+    - Current Topic: {topic_title}
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    CURRENT USER REQUEST:
+    "{user_query}"
+
+    CLASSIFICATION CATEGORIES:
+    - LEGITIMATE_REQUEST: Valid requests for policy content, explanations, improvements, etc.
+    - SMALL_TALK: Casual conversation, greetings, personal questions unrelated to work
+    - INAPPROPRIATE: Offensive, harmful, or unethical content
+
+    Consider the conversation context when making your decision. A request might seem off-topic but could be legitimate given the conversation flow.
+
+    Respond in this exact format:
+    CATEGORY: [category]
+    CONFIDENCE: [0.0-1.0]
+    REASON: [brief explanation]
+    SHOULD_PROCEED: [true/false]
+
+generate_toc:
+  template: |
+    You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
+
+    POLICY CONTEXT:
+    - Title: {title}
+    - Function: {function}
+    - Industry: {industry}
+    - Company: {company_name}
+    - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, adjust the TOC structure:
+
+    | Detail Level | TOC Approach |
+    |--------------|--------------|
+    | Light (1-2) | Fewer main topics (3-5), focus on high-level principles and outcomes |
+    | Moderate (3) | Balanced structure (4-6 main topics), mix of principles and procedures |
+    | Heavy (4-5) | More comprehensive topics (6-8), detailed procedures and step-by-step guides |
+
+    Apply the detail level ({detail_level}) to determine:
+    - The number and granularity of topics and subtopics
+    - Whether to focus on principles (light) or procedures (heavy)
+    - The depth of breakdown needed for each section
+
+    TASK:
+    Generate a well-structured Table of Contents for a "{title}" policy document. The TOC should:
+    1. Be specific to the {industry} industry and appropriate for a {title}
+    2. Follow best practices for {country} regulations and standards
+    3. Consider the applicable regulations: {regulations}
+    4. Incorporate client-specific requests: {client_specific_requests}
+    5. Consider sector-specific comments: {sector_specific_comments}
+    6. Align with the detail level ({detail_level}) as outlined in the guidance above
+    7. Include {max_topics} main topics maximum
+    8. Include up to {max_subtopics} subtopics per main topic
+
+    Consider:
+    - What sections are typically needed for a {title}
+    - Industry-specific compliance requirements for {industry}
+    - Local regulations in {country}
+    - Common organizational needs
+    - The function area: {function}
+
+    IMPORTANT: Return the TOC as a JSON array with the following structure:
+    [
+      {{
+        "topic": "Main Topic Title",
+        "subtopics": [
+          {{"topic": "Subtopic 1 Title"}},
+          {{"topic": "Subtopic 2 Title"}}
+        ]
+      }}
+    ]
+
+    Return ONLY the JSON array, no additional text or explanation.
+
+    JSON TOC:
+
+generate_toc_from_description:
+  template: |
+    You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
+
+    POLICY CONTEXT:
+    - Title: {title}
+    - Description: {description}
+    - Function: {function}
+    - Industry: {industry}
+    - Company: {company_name}
+    - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, adjust the TOC structure:
+
+    | Detail Level | TOC Approach |
+    |--------------|--------------|
+    | Light (1-2) | Fewer main topics (3-5), focus on high-level principles and outcomes |
+    | Moderate (3) | Balanced structure (4-6 main topics), mix of principles and procedures |
+    | Heavy (4-5) | More comprehensive topics (6-8), detailed procedures and step-by-step guides |
+
+    Apply the detail level ({detail_level}) to determine:
+    - The number and granularity of topics and subtopics
+    - Whether to focus on principles (light) or procedures (heavy)
+    - The depth of breakdown needed for each section
+
+    TASK:
+    Generate a well-structured Table of Contents for this policy document. The TOC should:
+    1. Be specific to the {industry} industry
+    2. Address the requirements mentioned in the description (if provided)
+    3. Follow best practices for {country} regulations and standards
+    4. Consider the applicable regulations: {regulations}
+    5. Incorporate client-specific requests: {client_specific_requests}
+    6. Consider sector-specific comments: {sector_specific_comments}
+    7. Align with the detail level ({detail_level}) as outlined in the guidance above
+    8. Include {max_topics} main topics maximum
+    9. Include up to {max_subtopics} subtopics per main topic
+
+    Consider:
+    - Industry-specific compliance requirements
+    - Local regulations in {country}
+    - Common organizational needs in {industry}
+    - The specific focus areas mentioned in the description
+
+    IMPORTANT: Return the TOC as a JSON array with the following structure:
+    [
+      {{
+        "topic": "Main Topic Title",
+        "subtopics": [
+          {{"topic": "Subtopic 1 Title"}},
+          {{"topic": "Subtopic 2 Title"}}
+        ]
+      }}
+    ]
+
+    Return ONLY the JSON array, no additional text or explanation.
+
+    JSON TOC:
+
+parse_toc_modification:
+  template: |
+    You are an expert assistant helping to modify the Table of Contents (TOC) of a policy document through natural language commands.
+
+    DOCUMENT CONTEXT:
+    - Title: {draft_title}
+    - Description: {draft_description}
+    - Company: {company_name}
+    - Industry: {industry}
+    - Location: {city}, {country}
+
+    CURRENT TABLE OF CONTENTS:
+    {current_toc}
+
+    CONVERSATION HISTORY:
+    {conversation_history}
+
+    USER COMMAND:
+    {user_command}
+
+    TASK:
+    Parse the user's natural language command and determine what modification they want to make to the TOC.
+
+    IMPORTANT: Use "suggest_topics" action when the user asks for:
+    - Suggestions or recommendations for topics/subtopics
+    - What topics should be added for specific requirements
+    - Ideas for improving the document structure
+    - Topics related to compliance, regulations, or best practices
+    - Examples: "What security topics should I include?", "Suggest data privacy sections", "What's missing for GDPR compliance?"
+
+    Use other actions (add_topic, remove_topic, etc.) when the user gives specific instructions to modify the TOC directly.
+
+    Possible actions include:
+    - chat_response: Respond conversationally to questions, comments, or discussion about the TOC
+    - suggest_topics: Suggest new topics/subtopics based on user requirements
+    - add_topic: Add a new main topic
+    - add_subtopic: Add a subtopic to an existing topic
+    - remove_topic: Remove a single main topic
+    - remove_topics: Remove multiple main topics (use when user wants to delete 2 or more topics)
+    - remove_subtopic: Remove a subtopic
+    - rename_topic: Rename a main topic
+    - rename_subtopic: Rename a subtopic
+    - reorder_topics: Change the order of main topics
+    - reorder_subtopics: Change the order of subtopics within a topic
+    - move_topic: Move a topic to a different position
+    - move_subtopic: Move a subtopic to a different topic or position
+    - split_topic: Split one topic into two
+    - merge_topics: Merge two or more topics into one
+
+    IMPORTANT: Return your analysis as a JSON object with the following structure:
+    {{
+      "action": "action_type",
+      "parameters": {{
+        // action-specific parameters
+        // For chat_response: "message" (your conversational response)
+        // For suggest_topics: "query", "context", "num_suggestions" (optional, default 5)
+        // For add_topic: "title", "position", "subtopics" (optional array)
+        // For add_subtopic: "topic_id", "topic_name", "title", "position"
+        // For remove_topic: "topic_id", "topic_name" (for single topic removal)
+        // For remove_topics: "topic_ids" (array), "topic_names" (array) (for multiple topics)
+        // For remove_subtopic: "topic_id", "subtopic_id", "subtopic_name"
+        // For rename_topic: "topic_id", "topic_name", "new_name"
+        // For rename_subtopic: "topic_id", "subtopic_id", "subtopic_name", "new_name"
+        // For reorder_topics: "new_order" (array of topic_ids)
+        // For move_topic: "topic_id", "topic_name", "new_position"
+        // For move_subtopic: "source_topic_id", "target_topic_id", "subtopic_id", "new_position"
+        // For split_topic: "topic_id", "topic_name", "split_point", "new_topic_name"
+        // For merge_topics: "topic_ids", "topic_names", "merged_name"
+      }},
+      "interpretation": "Human-readable description of what will be done",
+      "requires_confirmation": true/false,
+      "follow_up_question": "Optional question to clarify or enhance the command" or null
+    }}
+
+    IMPORTANT: Set "requires_confirmation": true for:
+    - suggest_topics (always requires confirmation to apply)
+    - remove_topic, remove_topics, or remove_subtopic (destructive operations)
+    - merge_topics (combining content)
+    - Any operation where the user might want to preview changes
+
+    If the user is asking a question about the TOC, making a comment, requesting feedback, or wants to discuss the document structure (rather than directly modify it), use action "chat_response" with a "message" parameter containing your helpful, conversational response. You should analyze the current TOC and provide thoughtful answers. Examples:
+    - "What do you think of the current TOC?" → chat_response with your analysis
+    - "Is this TOC comprehensive enough?" → chat_response with your assessment
+    - "What topics are missing?" → chat_response (or suggest_topics if they want additions)
+    - "Explain topic 3" → chat_response with explanation
+    - General greetings or thanks → chat_response
+
+    If the command is unclear or ambiguous regarding a modification, set action to "clarification_needed" and include a follow_up_question.
+
+    Use the IDs from the current TOC when available. If the user refers to topics by name, include both the name and try to match it to the ID.
+    For remove operations, always include both topic_id (if found) and topic_name to ensure proper matching.
+
+    IMPORTANT for deletion commands:
+    - If user wants to delete ONE topic (e.g., "delete topic 3", "remove the security section"), use "remove_topic"
+    - If user wants to delete MULTIPLE topics (e.g., "delete topics 3 and 4", "remove topics 2, 3, and 5"), use "remove_topics"
+    - When user refers to topics by number (e.g., "topic 3"), include that in topic_name or topic_names
+
+    Return ONLY the JSON object, no additional text.
+
+    JSON RESPONSE:
+
+suggest_toc_topics:
+  template: |
+    You are an AI assistant helping to suggest relevant topics and subtopics for a policy document.
+
+    DOCUMENT CONTEXT:
+    - Title: {draft_title}
+    - Description: {draft_description}
+    - Function: {function}
+    - Industry: {industry}
+    - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    When suggesting topics, consider the detail level:
+
+    | Detail Level | Suggestion Approach |
+    |--------------|---------------------|
+    | Light (1-2) | Suggest high-level, principle-based topics focused on "why" and outcomes |
+    | Moderate (3) | Suggest balanced topics with mix of principles and key procedures |
+    | Heavy (4-5) | Suggest detailed, procedural topics with step-by-step guidance focus |
+
+    CURRENT TABLE OF CONTENTS:
+    {current_toc}
+
+    USER REQUEST:
+    {user_query}
+
+    TASK:
+    Based on the user's request and the document context, suggest relevant topics and/or subtopics that would enhance the policy document. Consider:
+    1. Industry-specific requirements and regulations for {industry}
+    2. Local compliance needs in {country}
+    3. Applicable regulations: {regulations}
+    4. Client-specific requests: {client_specific_requests}
+    5. Sector-specific comments: {sector_specific_comments}
+    6. Detail level ({detail_level}) - suggest topics aligned with the appropriate level of detail
+    7. Best practices and standards
+    8. Topics that complement the existing structure
+    9. The specific focus mentioned in the user's request
+
+    Provide suggestions that are:
+    - Relevant to the document's purpose
+    - Not duplicating existing topics
+    - Specific and actionable
+    - Appropriate for the {industry} industry
+    - Compliant with {country} regulations and the specified regulations
+    - Aligned with the detail level (light vs heavy approach)
+
+    Return your suggestions as a JSON object with the following structure:
+    {{
+      "suggestions": [
+        {{
+          "type": "topic" or "subtopic",
+          "title": "Suggested title",
+          "description": "Brief explanation of why this is relevant",
+          "parent_topic": "Name of parent topic if this is a subtopic suggestion",
+          "proposed_position": "Where this might fit (e.g., 'after Security Policy', 'under Data Protection')",
+          "subtopics": ["List of suggested subtopics if this is a topic"] // optional
+        }}
+      ],
+      "rationale": "Overall explanation of why these suggestions are relevant",
+      "additional_notes": "Any additional context or recommendations"
+    }}
+
+    JSON RESPONSE:

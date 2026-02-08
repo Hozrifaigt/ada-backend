@@ -21,7 +21,7 @@ class IndexStatsResponse(BaseModel):
     semantic_search_enabled: bool
     fields: list
 
-router = APIRouter()
+router = APIRouter(prefix="/admin")
 
 def _validate_admin_api_key(api_key: Optional[str]) -> bool:
     """Validate admin API key from header."""
@@ -278,3 +278,5 @@ async def process_and_index_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start processing: {str(e)}"
         )
+
+# Excel template endpoints removed - no longer using Excel sheets for policy templates
