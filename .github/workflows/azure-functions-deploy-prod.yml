@@ -2,37 +2,51 @@ name: Deploy to Azure Function App - Production
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     environment: prod
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 # Updated to v4
+        uses: actions/checkout@v4
+
+      # REQUIRED: Func CLI needs Node.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Azure Functions Core Tools v4
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install dependencies (CORRECT PATH STRUCTURE)
         run: |
           cd azure-functions
           python -m pip install --upgrade pip
-          # Note: Flex Consumption prefers a standard pip install if doing remote build,
-          # but for a zip deploy, we'll keep your structure or use the action's default.
-          pip install -r requirements.txt
+          # Critical: Include python3.11 in path
+          pip install -r requirements.txt --target=".python_packages/lib/python3.11/site-packages"
 
-      - name: 'Run Azure Functions Action'
-        uses: azure/functions-action@v1
+      - name: Login to Azure
+        uses: azure/login@v2
         with:
-          app-name: 'ada-backend-prod'
-          # This action handles the zip and deployment logic specifically for Azure
-          package: './azure-functions' 
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+
+      - name: Deploy with Func CLI (FLEX CONSUMPTION REQUIRED)
+        run: |
+          cd azure-functions
+          # --no-build: Use pre-installed deps | --force: Overwrite
+          func azure functionapp publish ada-backend-prod --python --no-build --force
+
+      - name: Verify Deployment
+        run: |
+          echo "✅ Deployment completed to PROD: ada-backend-prod"
+          echo "ℹ️ Check logs in Azure Portal if functions don't trigger"
