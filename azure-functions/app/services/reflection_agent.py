@@ -144,7 +144,7 @@ class ReflectionAgent:
         sections.append(f"Title: {draft.metadata.title}")
         sections.append(f"Description: {draft.metadata.description or 'N/A'}")
         sections.append(f"Function: {draft.metadata.function}")
-        sections.append(f"Policy Type: {draft.metadata.policy_type}")
+        sections.append(f"Policy Type: {draft.metadata.effective_policy_type}")
         sections.append(f"Detail Level: {draft.metadata.detail_level}/5")
         sections.append(f"Applicable Regulations: {draft.metadata.regulations}")
         sections.append("")

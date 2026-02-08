@@ -404,6 +404,68 @@ classify_query:
     REASON: [brief explanation]
     SHOULD_PROCEED: [true/false]
 
+generate_toc:
+  template: |
+    You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
+
+    POLICY CONTEXT:
+    - Title: {title}
+    - Function: {function}
+    - Industry: {industry}
+    - Company: {company_name}
+    - Location: {city}, {country}
+    - Client-Specific Requests: {client_specific_requests}
+    - Sector-Specific Comments: {sector_specific_comments}
+    - Applicable Regulations: {regulations}
+    - Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, adjust the TOC structure:
+
+    | Detail Level | TOC Approach |
+    |--------------|--------------|
+    | Light (1-2) | Fewer main topics (3-5), focus on high-level principles and outcomes |
+    | Moderate (3) | Balanced structure (4-6 main topics), mix of principles and procedures |
+    | Heavy (4-5) | More comprehensive topics (6-8), detailed procedures and step-by-step guides |
+
+    Apply the detail level ({detail_level}) to determine:
+    - The number and granularity of topics and subtopics
+    - Whether to focus on principles (light) or procedures (heavy)
+    - The depth of breakdown needed for each section
+
+    TASK:
+    Generate a well-structured Table of Contents for a "{title}" policy document. The TOC should:
+    1. Be specific to the {industry} industry and appropriate for a {title}
+    2. Follow best practices for {country} regulations and standards
+    3. Consider the applicable regulations: {regulations}
+    4. Incorporate client-specific requests: {client_specific_requests}
+    5. Consider sector-specific comments: {sector_specific_comments}
+    6. Align with the detail level ({detail_level}) as outlined in the guidance above
+    7. Include {max_topics} main topics maximum
+    8. Include up to {max_subtopics} subtopics per main topic
+
+    Consider:
+    - What sections are typically needed for a {title}
+    - Industry-specific compliance requirements for {industry}
+    - Local regulations in {country}
+    - Common organizational needs
+    - The function area: {function}
+
+    IMPORTANT: Return the TOC as a JSON array with the following structure:
+    [
+      {{
+        "topic": "Main Topic Title",
+        "subtopics": [
+          {{"topic": "Subtopic 1 Title"}},
+          {{"topic": "Subtopic 2 Title"}}
+        ]
+      }}
+    ]
+
+    Return ONLY the JSON array, no additional text or explanation.
+
+    JSON TOC:
+
 generate_toc_from_description:
   template: |
     You are an expert policy consultant helping to create a comprehensive Table of Contents for a new policy document.
@@ -500,6 +562,7 @@ parse_toc_modification:
     Use other actions (add_topic, remove_topic, etc.) when the user gives specific instructions to modify the TOC directly.
 
     Possible actions include:
+    - chat_response: Respond conversationally to questions, comments, or discussion about the TOC
     - suggest_topics: Suggest new topics/subtopics based on user requirements
     - add_topic: Add a new main topic
     - add_subtopic: Add a subtopic to an existing topic
@@ -520,6 +583,7 @@ parse_toc_modification:
       "action": "action_type",
       "parameters": {{
         // action-specific parameters
+        // For chat_response: "message" (your conversational response)
         // For suggest_topics: "query", "context", "num_suggestions" (optional, default 5)
         // For add_topic: "title", "position", "subtopics" (optional array)
         // For add_subtopic: "topic_id", "topic_name", "title", "position"
@@ -545,7 +609,14 @@ parse_toc_modification:
     - merge_topics (combining content)
     - Any operation where the user might want to preview changes
 
-    If the command is unclear or ambiguous, set action to "clarification_needed" and include a follow_up_question.
+    If the user is asking a question about the TOC, making a comment, requesting feedback, or wants to discuss the document structure (rather than directly modify it), use action "chat_response" with a "message" parameter containing your helpful, conversational response. You should analyze the current TOC and provide thoughtful answers. Examples:
+    - "What do you think of the current TOC?" → chat_response with your analysis
+    - "Is this TOC comprehensive enough?" → chat_response with your assessment
+    - "What topics are missing?" → chat_response (or suggest_topics if they want additions)
+    - "Explain topic 3" → chat_response with explanation
+    - General greetings or thanks → chat_response
+
+    If the command is unclear or ambiguous regarding a modification, set action to "clarification_needed" and include a follow_up_question.
 
     Use the IDs from the current TOC when available. If the user refers to topics by name, include both the name and try to match it to the ID.
     For remove operations, always include both topic_id (if found) and topic_name to ensure proper matching.

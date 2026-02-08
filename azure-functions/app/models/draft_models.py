@@ -215,6 +215,12 @@ class DraftMetadata(BaseModel):
     sector_specific_comments: Optional[str] = Field(None, description="Sector-specific comments")
     regulations: str = Field(default="", description="Applicable regulation")
     detail_level: int = Field(default=3, description="Level of detail: 1 (light) to 5 (comprehensive)")
+    policy_type: Optional[str] = Field(None, description="Policy type (e.g., 'Leave Policy'). Falls back to title if not set.")
+
+    @property
+    def effective_policy_type(self) -> str:
+        """Return policy_type if set, otherwise fall back to title."""
+        return self.policy_type or self.title
 
 
 class CompleteDraft(BaseModel):
@@ -222,6 +228,10 @@ class CompleteDraft(BaseModel):
     id: str = Field(..., default_factory=lambda: str(uuid.uuid4()))
     metadata: DraftMetadata
     toc: List[TOCTopic]
+    toc_chat_history: List[ConversationEntry] = Field(
+        default_factory=list,
+        description="Conversation history for TOC chat assistant"
+    )
 
 # Update forward references
 TOCTopic.model_rebuild()

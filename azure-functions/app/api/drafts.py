@@ -106,13 +106,14 @@ async def validate_draft(
 
 
 @router.post("/initialize", response_model=InitializeDraftResponse)
-async def initialize_draft(
+async def initialize_draft_endpoint(
     request: InitializeDraftRequest,
     draft_service: DraftService = Depends(get_draft_service),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Initialize a new draft with AI-generated TOC based on policy information.
+    TOC is generated from title and context - description is optional.
     """
     logger.info(f"Draft initialization requested by user: {current_user.get('email')}")
 
@@ -121,8 +122,8 @@ async def initialize_draft(
         raw_name = current_user.get('name', current_user.get('email'))
         clean_name = raw_name.split('-')[0].strip() if raw_name and '-' in raw_name else raw_name
 
-        result = await draft_service.initialize_draft_from_description(
-            description=request.description,
+        # Use the new initialize_draft method (no description required)
+        result = await draft_service.initialize_draft(
             title=request.title,
             user_id=clean_name,
             client_metadata=request.client_metadata,
@@ -150,6 +151,8 @@ async def initialize_draft(
 
     except Exception as e:
         logger.error(f"Failed to initialize draft: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -696,6 +699,18 @@ async def chat_modify_toc(
                 follow_up_question=None
             )
 
+        # Handle conversational responses
+        if parsed_operation.get('action') == 'chat_response':
+            chat_msg = parsed_operation.get('parameters', {}).get('message', '') or parsed_operation.get('interpretation', '')
+            return TOCChatResponse(
+                success=True,
+                operation=None,
+                preview_toc=None,
+                current_toc=draft.get('toc', []),
+                message=chat_msg,
+                follow_up_question=parsed_operation.get('follow_up_question')
+            )
+
         # Check if clarification is needed
         if parsed_operation.get('action') == 'clarification_needed':
             return TOCChatResponse(
@@ -911,6 +926,25 @@ async def confirm_toc_modification(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to apply TOC modification: {str(e)}"
         )
+
+
+@router.put("/{draft_id}/toc/chat-history")
+async def update_toc_chat_history(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Save the TOC chat conversation history."""
+    logger.info(f"Updating TOC chat history for draft {draft_id} by user: {current_user.get('email')}")
+    conversation_history = request.get("conversation_history", [])
+    success = draft_service.update_toc_chat_history(draft_id, conversation_history)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save TOC chat history"
+        )
+    return {"success": True}
 
 
 # Template endpoint removed - no longer using Excel templates
