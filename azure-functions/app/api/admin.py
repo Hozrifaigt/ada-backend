@@ -58,7 +58,7 @@ def reset_search_index(x_admin_api_key: Optional[str] = Header(None)):
         logger.info(f"Attempting to reset index '{index_name}'")
         success = index_manager.recreate_index()        
         if success:
-            logger.warning(f"Successfully RESET index '{index_name}'.")
+            logger.warning(f"Successfully RESET INDEX '{index_name}'.")
             stats = index_manager.get_index_stats()
             
             return AdminResponse(
