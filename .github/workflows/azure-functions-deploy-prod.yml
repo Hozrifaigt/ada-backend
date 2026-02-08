@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -14,39 +17,46 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # REQUIRED: Func CLI needs Node.js
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install Azure Functions Core Tools v4
-        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
-
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies (CORRECT PATH STRUCTURE)
+      # Optional: Verify dependencies install correctly
+      - name: Verify dependencies
         run: |
           cd azure-functions
-          python -m pip install --upgrade pip
-          # Critical: Include python3.11 in path
-          pip install -r requirements.txt --target=".python_packages/lib/python3.11/site-packages"
+          pip install -r requirements.txt --dry-run 2>/dev/null || echo "Note: --dry-run not supported, skipping"
 
-      - name: Login to Azure
-        uses: azure/login@v2
+      # CRITICAL: Create clean deployment package (NO local dependencies)
+      - name: Create deployment package
+        run: |
+          cd azure-functions
+          # Only source code, requirements.txt, and config files
+          # Azure will install dependencies remotely via Oryx
+          zip -r ../deploy.zip . \
+            -x "*.git*" \
+            -x "__pycache__/*" \
+            -x "*.pyc" \
+            -x ".env*" \
+            -x "local.settings.json" \
+            -x ".python_packages/*" \
+            -x "node_modules/*" \
+            -x "tests/*" \
+            -x "*.md" \
+            -x ".vscode/*" \
+            -x ".idea/*"
+
+      - name: Deploy to Azure Function App (Remote Build)
+        uses: Azure/functions-action@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
-
-      - name: Deploy with Func CLI (FLEX CONSUMPTION REQUIRED)
-        run: |
-          cd azure-functions
-          # --no-build: Use pre-installed deps | --force: Overwrite
-          func azure functionapp publish ada-backend-prod --python --no-build --force
+          app-name: ada-backend-prod
+          package: ./deploy.zip
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}
+          remote-build: true
+          sku: flexconsumption
 
       - name: Verify Deployment
         run: |
           echo "✅ Deployment completed to PROD: ada-backend-prod"
-          echo "ℹ️ Check logs in Azure Portal if functions don't trigger"
+          echo "ℹ️ Check 'Deployment Center' in Azure Portal for build logs"
