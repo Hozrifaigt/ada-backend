@@ -39,9 +39,6 @@ jobs:
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_PROD }}
           package: './azure-functions'
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PROD }}
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
-          respect-funcignore: true
 
       - name: Retry Deployment if Failed
         if: steps.deploy1.outcome == 'failure'
@@ -56,9 +53,6 @@ jobs:
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_PROD }}
           package: './azure-functions'
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PROD }}
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
-          respect-funcignore: true
 
       - name: Deployment Summary
         run: |
