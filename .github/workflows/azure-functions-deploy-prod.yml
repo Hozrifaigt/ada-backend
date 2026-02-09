@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  AZURE_FUNCTIONAPP_NAME: 'ada-backend-prod'
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: './azure-functions'
+  PYTHON_VERSION: '3.11'
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -17,46 +22,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      # Optional: Verify dependencies install correctly
-      - name: Verify dependencies
+      - name: Install dependencies
+        shell: bash
         run: |
-          cd azure-functions
-          pip install -r requirements.txt --dry-run 2>/dev/null || echo "Note: --dry-run not supported, skipping"
+          pushd '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+          popd
 
-      # CRITICAL: Create clean deployment package (NO local dependencies)
-      - name: Create deployment package
-        run: |
-          cd azure-functions
-          # Only source code, requirements.txt, and config files
-          # Azure will install dependencies remotely via Oryx
-          zip -r ../deploy.zip . \
-            -x "*.git*" \
-            -x "__pycache__/*" \
-            -x "*.pyc" \
-            -x ".env*" \
-            -x "local.settings.json" \
-            -x ".python_packages/*" \
-            -x "node_modules/*" \
-            -x "tests/*" \
-            -x "*.md" \
-            -x ".vscode/*" \
-            -x ".idea/*"
-
-      - name: Deploy to Azure Function App (Remote Build)
+      - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
+        id: fa
         with:
-          app-name: ada-backend-prod
-          package: ./deploy.zip
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PROD }}
-          remote-build: true
           sku: flexconsumption
-
-      - name: Verify Deployment
-        run: |
-          echo "✅ Deployment completed to PROD: ada-backend-prod"
-          echo "ℹ️ Check 'Deployment Center' in Azure Portal for build logs"
+          remote-build: true
