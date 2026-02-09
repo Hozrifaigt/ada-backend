@@ -52,7 +52,7 @@ jobs:
         with:
           app-name: ada-backend-prod
           package: ./deploy.zip
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PROD }}
           remote-build: true
           sku: flexconsumption
 
