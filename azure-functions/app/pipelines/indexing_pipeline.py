@@ -4,7 +4,7 @@ import json
 import uuid
 from typing import List, Dict, Any
 
-from tqdm.asyncio import tqdm
+# from tqdm.asyncio import tqdm
 from app.pipelines.components.llm import AzureLLM
 from app.pipelines.components.embedder import AzureEmbedder
 from app.pipelines.components.file_loader import LocalDocxLoader
@@ -53,7 +53,8 @@ class IndexingPipeline:
         all_policy_docs = []
         all_topic_docs = []
         
-        for file_path in tqdm(file_paths, desc="Processing files"):
+        # for file_path in tqdm(file_paths, desc="Processing files"):
+        for file_path in file_paths:
             try:
                 # Process document using new structure
                 structured_data = self.loader.load_and_structure(file_path)
@@ -127,7 +128,8 @@ class IndexingPipeline:
         # Step 2: Generate summaries and embeddings for policy documents ONLY
         logger.info("Step 2: Generating policy summaries and embeddings")
         
-        for policy_doc in tqdm(all_policy_docs, desc="Summarizing policies"):
+        # for policy_doc in tqdm(all_policy_docs, desc="Summarizing policies"):
+        for policy_doc in all_policy_docs:
             try:
                 full_text = policy_doc.pop("full_text")
                 logger.info(f"Generating summary for {policy_doc['filename']}")
