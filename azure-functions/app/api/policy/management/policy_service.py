@@ -2,7 +2,7 @@ import os
 import json
 import logging
 
-from unstructured_client import Optional
+# from unstructured_client import Optional
 
 from fastapi import HTTPException, status
 from typing import Dict, Any
