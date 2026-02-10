@@ -49,11 +49,7 @@ async def index_regulations(
         vector_store = AzureVectorStore(embedder=embedder)
 
         # Initialize regulations processor
-        regulations_dir = settings.REGULATIONS_PATH
-        logger.info(f"Using regulations directory: {regulations_dir}")
-
         processor = RegulationsProcessor(
-            regulations_dir=regulations_dir,
             embedder=embedder,
             vector_store=vector_store
         )
@@ -73,12 +69,6 @@ async def index_regulations(
 
         return index_status
 
-    except FileNotFoundError as e:
-        logger.error(f"Regulations directory not found: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Regulations directory not found. Please ensure PDFs are in the correct location."
-        )
     except Exception as e:
         logger.error(f"Failed to index regulations: {e}")
         raise HTTPException(

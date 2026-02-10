@@ -4,11 +4,16 @@ Pipeline for processing regulation PDFs and indexing them for retrieval.
 import asyncio
 import time
 import logging
+import tempfile
+import shutil
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 
+from azure.storage.blob import BlobServiceClient
+
 from app.services.regulations_service import RegulationsService
+from app.config.settings import settings
 from app.models.regulation_models import (
     RegulationMetadata,
     RegulationChunk,
@@ -93,7 +98,6 @@ class RegulationsProcessor:
 
     def __init__(
         self,
-        regulations_dir: str = "/code/app/regulations",
         embedder: Optional[AzureEmbedder] = None,
         vector_store: Optional[AzureVectorStore] = None,
         llm_service = None
@@ -102,22 +106,27 @@ class RegulationsProcessor:
         Initialize the regulations processor.
 
         Args:
-            regulations_dir: Directory containing regulation PDFs
             embedder: Embedder instance (will create if not provided)
             vector_store: Vector store instance (will create if not provided)
             llm_service: LLM service for topic extraction (will create if not provided)
         """
-        self.regulations_dir = Path(regulations_dir)
         self.regulations_service = RegulationsService()
         self.embedder = embedder or AzureEmbedder()
         self.vector_store = vector_store or AzureVectorStore(embedder=self.embedder)
-        
+
+        # Azure Blob Storage client for regulations container
+        self.blob_service_client = BlobServiceClient.from_connection_string(
+            settings.AZURE_STORAGE_CONNECTION_STRING
+        )
+        self.container_client = self.blob_service_client.get_container_client(
+            settings.AZURE_STORAGE_REGULATIONS_CONTAINER_NAME
+        )
+
         # LLM service for enhanced topic extraction
         if llm_service is None:
             try:
                 from app.pipelines.components.llm import AzureLLM
                 from app.prompts.manager import PromptManager
-                from app.config.settings import settings
                 self.llm_service = AzureLLM(prompt_manager=PromptManager(settings.PROMPT_MANAGER_PATH))
             except Exception as e:
                 logger.warning(f"Could not initialize LLM service for topic extraction: {e}. Using keyword-based extraction.")
@@ -125,12 +134,32 @@ class RegulationsProcessor:
         else:
             self.llm_service = llm_service
 
-        if not self.regulations_dir.exists():
-            raise ValueError(f"Regulations directory not found: {regulations_dir}")
+    def _download_blobs_to_temp(self) -> tuple[Path, List[Path]]:
+        """
+        Download all PDF files from the Azure Blob Storage regulations container to a temp directory.
+
+        Returns:
+            Tuple of (temp_dir path, list of downloaded file paths)
+        """
+        temp_dir = Path(tempfile.mkdtemp(prefix="regulations_"))
+        downloaded_files = []
+
+        blobs = self.container_client.list_blobs()
+        for blob in blobs:
+            if blob.name.lower().endswith(".pdf"):
+                local_path = temp_dir / blob.name
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                blob_client = self.container_client.get_blob_client(blob.name)
+                with open(local_path, "wb") as f:
+                    f.write(blob_client.download_blob().readall())
+                downloaded_files.append(local_path)
+                logger.info(f"Downloaded blob: {blob.name}")
+
+        return temp_dir, downloaded_files
 
     async def process_all_regulations(self, max_concurrent_pdfs: int = 3) -> RegulationsIndexStatus:
         """
-        Process all regulation PDFs in the regulations directory in parallel.
+        Process all regulation PDFs from Azure Blob Storage in parallel.
 
         Args:
             max_concurrent_pdfs: Maximum number of PDFs to process concurrently (default 3)
@@ -138,49 +167,55 @@ class RegulationsProcessor:
         Returns:
             RegulationsIndexStatus with processing results
         """
-        logger.info(f"Starting regulation processing from: {self.regulations_dir}")
+        logger.info(f"Starting regulation processing from Azure Blob Storage container: {settings.AZURE_STORAGE_REGULATIONS_CONTAINER_NAME}")
 
-        # Get all PDF files
-        pdf_files = list(self.regulations_dir.glob("*.pdf"))
-        logger.info(f"Found {len(pdf_files)} PDF files to process (max {max_concurrent_pdfs} concurrent)")
+        # Download blobs to temp directory
+        temp_dir, pdf_files = self._download_blobs_to_temp()
+        logger.info(f"Downloaded {len(pdf_files)} PDF files to {temp_dir} (max {max_concurrent_pdfs} concurrent)")
 
-        # Use semaphore to limit concurrent PDF processing
-        semaphore = asyncio.Semaphore(max_concurrent_pdfs)
+        try:
+            # Use semaphore to limit concurrent PDF processing
+            semaphore = asyncio.Semaphore(max_concurrent_pdfs)
 
-        async def process_with_semaphore(pdf_file: Path) -> RegulationProcessingResult:
-            async with semaphore:
-                try:
-                    return await self.process_regulation(str(pdf_file))
-                except Exception as e:
-                    logger.error(f"Failed to process {pdf_file.name}: {e}")
-                    return RegulationProcessingResult(
-                        regulation_name=pdf_file.name,
-                        file_path=str(pdf_file),
-                        chunks_created=0,
-                        articles_found=0,
-                        success=False,
-                        error_message=str(e),
-                        processing_time_seconds=0.0
-                    )
+            async def process_with_semaphore(pdf_file: Path) -> RegulationProcessingResult:
+                async with semaphore:
+                    try:
+                        return await self.process_regulation(str(pdf_file))
+                    except Exception as e:
+                        logger.error(f"Failed to process {pdf_file.name}: {e}")
+                        return RegulationProcessingResult(
+                            regulation_name=pdf_file.name,
+                            file_path=str(pdf_file),
+                            chunks_created=0,
+                            articles_found=0,
+                            success=False,
+                            error_message=str(e),
+                            processing_time_seconds=0.0
+                        )
 
-        # Process all PDFs in parallel (limited by semaphore)
-        results = await asyncio.gather(*[
-            process_with_semaphore(pdf_file) for pdf_file in pdf_files
-        ])
+            # Process all PDFs in parallel (limited by semaphore)
+            results = await asyncio.gather(*[
+                process_with_semaphore(pdf_file) for pdf_file in pdf_files
+            ])
 
-        # Calculate totals
-        total_chunks = sum(r.chunks_created for r in results if r.success)
+            # Calculate totals
+            total_chunks = sum(r.chunks_created for r in results if r.success)
 
-        # Create index status
-        status = RegulationsIndexStatus(
-            total_regulations=len(results),
-            total_chunks=total_chunks,
-            last_updated=datetime.utcnow(),
-            regulations=list(results)
-        )
+            # Create index status
+            status = RegulationsIndexStatus(
+                total_regulations=len(results),
+                total_chunks=total_chunks,
+                last_updated=datetime.utcnow(),
+                regulations=list(results)
+            )
 
-        logger.info(f"Processing complete: {len(results)} regulations, {total_chunks} chunks")
-        return status
+            logger.info(f"Processing complete: {len(results)} regulations, {total_chunks} chunks")
+            return status
+
+        finally:
+            # Clean up temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.info(f"Cleaned up temp directory: {temp_dir}")
 
     async def process_regulation(self, pdf_path: str) -> RegulationProcessingResult:
         """

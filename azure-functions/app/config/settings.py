@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     AZURE_STORAGE_CONNECTION_STRING: str
     AZURE_STORAGE_CONTAINER_NAME: str
+    AZURE_STORAGE_REGULATIONS_CONTAINER_NAME: str = "regulations"
 
     AZURE_TABLE_STORAGE_CONNECTION_STRING: str
     AZURE_TABLE_NAME: str = "Policies"
@@ -40,9 +41,6 @@ class Settings(BaseSettings):
     LLM_CHUNK_SIZE: int = 10000
     LLM_CHUNK_OVERLAP: int = 300
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
-
-    # Regulations path - defaults to Docker path, can be overridden
-    REGULATIONS_PATH: str = "/code/app/regulations"
 
     # Regulation Search Settings
     REGULATION_SEARCH_MIN_SCORE: float = 0.55
