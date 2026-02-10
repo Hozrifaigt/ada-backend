@@ -517,11 +517,9 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             return UploadResult(successful=successful, failed=failed, total=len(documents))
 
         except AzureError as e:
-            logger.error(f"AZURE SEARCH UPLOAD FAILED: {type(e).__name__}: {e}", exc_info=True)
-            return UploadResult(successful=0, failed=len(documents), total=len(documents))
+            raise Exception(f"Azure Search upload error: {type(e).__name__}: {e}") from e
         except Exception as e:
-            logger.error(f"UNEXPECTED UPLOAD ERROR: {type(e).__name__}: {e}", exc_info=True)
-            return UploadResult(successful=0, failed=len(documents), total=len(documents))
+            raise Exception(f"Upload error: {type(e).__name__}: {e}") from e
 
     async def index_regulations(self, chunks: List[RegulationChunk]) -> bool:
         """
@@ -560,8 +558,7 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
                 embeddings = self.embedder.embed_documents(enriched_texts)
                 logger.info(f"Successfully generated {len(embeddings)} embeddings")
             except Exception as embed_err:
-                logger.error(f"EMBEDDING GENERATION FAILED: {type(embed_err).__name__}: {embed_err}", exc_info=True)
-                raise
+                raise Exception(f"Embedding generation failed: {type(embed_err).__name__}: {embed_err}") from embed_err
 
             # Create search documents with embeddings
             for chunk, embedding in zip(chunks, embeddings):
@@ -572,6 +569,7 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             # Upload in batches using regulations client
             batch_size = getattr(settings, 'BATCH_SIZE', 24)
             total_result = UploadResult(successful=0, failed=0, total=len(documents_to_upload))
+            upload_errors = []
 
             for i in range(0, len(documents_to_upload), batch_size):
                 batch = documents_to_upload[i:i + batch_size]
@@ -580,16 +578,16 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
                 total_result.successful += batch_result.successful
                 total_result.failed += batch_result.failed
 
-                logger.info(f"Batch {i // batch_size + 1} complete: {batch_result.successful} successful")
+                if batch_result.failed > 0:
+                    upload_errors.append(f"Batch {i // batch_size + 1}: {batch_result.failed} failed")
 
-            logger.info(f"Regulation indexing complete: {total_result.successful} successful, "
-                       f"{total_result.failed} failed")
+            if total_result.failed > 0:
+                raise Exception(f"Search upload failed: {total_result.failed}/{total_result.total} docs failed. {'; '.join(upload_errors)}")
 
-            return total_result.failed == 0
+            return True
 
         except Exception as e:
-            logger.error(f"Failed to index regulations: {type(e).__name__}: {e}", exc_info=True)
-            return False
+            raise Exception(f"Regulation indexing error: {e}") from e
 
     async def search_relevant_regulations(
         self,
