@@ -106,7 +106,7 @@ app.include_router(debug.router, prefix="/api/v1", tags=["Debug"])
 
 @app.get("/healthcheck", tags=["Monitoring"])
 async def health_check():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.2.0"}
 
 @app.on_event("startup")
 async def startup_event():
