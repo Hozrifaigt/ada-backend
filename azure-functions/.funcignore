@@ -42,3 +42,8 @@ local.settings.json
 Dockerfile
 docker-compose.yml
 docker-compose.*.yml
+
+.venv
+.python_packages
+__pycache__
+.git

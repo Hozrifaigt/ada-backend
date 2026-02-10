@@ -1,13 +1,10 @@
 import azure.functions as func
 import json
-import os
-import sys
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Variable to hold the startup error message
 startup_error_message = ""
 startup_error_type = ""
 
@@ -23,7 +20,6 @@ except Exception as e:
     
     logger.error(f"Failed to load FastAPI: [{startup_error_type}] {startup_error_message}")
 
-    # Fallback to basic function app
     app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
     @app.route(route="hello")
