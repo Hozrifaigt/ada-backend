@@ -517,10 +517,10 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             return UploadResult(successful=successful, failed=failed, total=len(documents))
 
         except AzureError as e:
-            logger.error(f"Azure error during regulation batch upload: {e}")
+            logger.error(f"AZURE SEARCH UPLOAD FAILED: {type(e).__name__}: {e}", exc_info=True)
             return UploadResult(successful=0, failed=len(documents), total=len(documents))
         except Exception as e:
-            logger.error(f"Unexpected error during regulation batch upload: {e}")
+            logger.error(f"UNEXPECTED UPLOAD ERROR: {type(e).__name__}: {e}", exc_info=True)
             return UploadResult(successful=0, failed=len(documents), total=len(documents))
 
     async def index_regulations(self, chunks: List[RegulationChunk]) -> bool:
@@ -556,8 +556,12 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
 
             # Generate embeddings in batch for better performance
             logger.info(f"Generating enriched embeddings for {len(enriched_texts)} chunks (with topics + metadata)...")
-            embeddings = self.embedder.embed_documents(enriched_texts)
-            logger.info(f"Successfully generated {len(embeddings)} embeddings")
+            try:
+                embeddings = self.embedder.embed_documents(enriched_texts)
+                logger.info(f"Successfully generated {len(embeddings)} embeddings")
+            except Exception as embed_err:
+                logger.error(f"EMBEDDING GENERATION FAILED: {type(embed_err).__name__}: {embed_err}", exc_info=True)
+                raise
 
             # Create search documents with embeddings
             for chunk, embedding in zip(chunks, embeddings):
@@ -584,7 +588,7 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             return total_result.failed == 0
 
         except Exception as e:
-            logger.error(f"Failed to index regulations: {e}")
+            logger.error(f"Failed to index regulations: {type(e).__name__}: {e}", exc_info=True)
             return False
 
     async def search_relevant_regulations(
