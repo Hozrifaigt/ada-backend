@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # Regulations path - defaults to Docker path, can be overridden
     REGULATIONS_PATH: str = "/code/app/regulations"
 
+    # SharePoint CDC settings
+    SHAREPOINT_SITE_URL: str = ""
+    SHAREPOINT_DRIVE_NAME: str = "Shared Documents"
+    SHAREPOINT_FOLDER_PATH: str = ""
+    SHAREPOINT_ENABLED: bool = False
+
     # Regulation Search Settings
     REGULATION_SEARCH_MIN_SCORE: float = 0.55
     REGULATION_SEARCH_TOP_K: int = 5

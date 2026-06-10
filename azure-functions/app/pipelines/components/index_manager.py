@@ -62,6 +62,8 @@ class AzureSearchIndexManager:
                 # Policy-specific fields (WITH vector for similarity search)
                 SimpleField(name="filename", type=SearchFieldDataType.String, filterable=True, facetable=True),
                 SimpleField(name="source", type=SearchFieldDataType.String, filterable=True),
+                SimpleField(name="web_url", type=SearchFieldDataType.String, filterable=False),
+                SimpleField(name="function", type=SearchFieldDataType.String, filterable=True, facetable=True),
                 SearchableField(name="description", type=SearchFieldDataType.String, searchable=True, analyzer_name="en.microsoft"),
                 SearchField(
                     name="description_vector",

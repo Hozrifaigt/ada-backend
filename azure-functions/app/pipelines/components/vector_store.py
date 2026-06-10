@@ -145,6 +145,8 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             "record_type": "policy",
             "filename": policy_doc.get('filename', ''),
             "source": policy_doc.get('source', ''),
+            "web_url": policy_doc.get('web_url', ''),
+            "function": policy_doc.get('function', ''),
             "description": policy_doc.get('description', ''),
             "description_vector": policy_doc.get('description_vector', []),
             "toc": toc_json,
@@ -213,11 +215,26 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
                 logger.debug(f"Prepared policy: {policy_doc.get('filename', 'unknown')}")
             
             result = self._upload_batch(documents_to_upload)
-            
+
+            # web_url was added to the schema later. If the live index doesn't have
+            # that column yet, policy uploads fail. Retry without web_url so policies
+            # still index (the SharePoint link just won't be available until the
+            # index is recreated with the field).
+            if result.failed > 0:
+                logger.warning(
+                    f"{result.failed} policy upload(s) failed — retrying without 'web_url' "
+                    f"(index may not have the field; run reset-index to enable links)"
+                )
+                stripped = []
+                for doc in documents_to_upload:
+                    doc.pop("web_url", None)
+                    stripped.append(doc)
+                result = self._upload_batch(stripped)
+
             logger.info(f"Policy upload complete: {result.successful} successful, {result.failed} failed "
                        f"(success rate: {result.success_rate:.2%})")
             return result.failed == 0
-            
+
         except Exception as e:
             logger.error(f"Failed to store policy documents: {e}")
             return False
@@ -262,53 +279,78 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             logger.error(f"Failed to store topic documents: {e}")
             return False
     
-    def search_similar_policies(self, query_vector: List[float], threshold: float = 0.6, top_k: int = 5) -> List[Dict]:
+    def search_similar_policies(self, query_vector: List[float], threshold: float = 0.6, top_k: int = 5,
+                                function: Optional[str] = None) -> List[Dict]:
         """
         Search for similar policies using vector similarity on descriptions.
         This is the ONLY vector search in the system.
+        If `function` is provided, only policies in that same function are considered
+        (e.g. an HR draft is never matched against an IT policy).
         """
         try:
             from azure.search.documents.models import VectorizedQuery
-            
+
             vector_query = VectorizedQuery(
                 vector=query_vector,
                 k_nearest_neighbors=top_k,
                 fields="description_vector"
             )
-            
-            results = self.search_client.search(
-                search_text="",
-                vector_queries=[vector_query],
-                filter="record_type eq 'policy'",
-                select="id,filename,description,source,toc,topic_ids",
-                top=top_k
-            )
-            
+
+            # Only compare against policies of the same function (categorical guard).
+            filter_expr = "record_type eq 'policy'"
+            if function:
+                safe_function = function.strip().lower().replace("'", "''")
+                filter_expr += f" and function eq '{safe_function}'"
+            logger.info(f"Policy search filter: {filter_expr}")
+
+            # web_url was added to the schema later; older indexes may not have it.
+            # Try selecting it, and fall back to a select without it if Azure rejects it.
+            base_select = "id,filename,description,source,toc,topic_ids"
+            try:
+                results = list(self.search_client.search(
+                    search_text="",
+                    vector_queries=[vector_query],
+                    filter=filter_expr,
+                    select=base_select + ",web_url",
+                    top=top_k
+                ))
+            except Exception as select_err:
+                logger.warning(f"web_url not in index, retrying without it: {select_err}")
+                results = list(self.search_client.search(
+                    search_text="",
+                    vector_queries=[vector_query],
+                    filter=filter_expr,
+                    select=base_select,
+                    top=top_k
+                ))
+
             processed_results = []
             for i, result in enumerate(results):
-                # Parse TOC JSON
                 toc = json.loads(result.get("toc", "[]"))
+                # Azure @search.score for cosine = 1 / (2 - cosine_similarity).
+                # Invert it back to the true cosine similarity so the threshold
+                # is intuitive and meaningful for text-embedding-ada-002 vectors.
+                azure_score = result.get('@search.score', 0.0)
+                cosine_similarity = 2 - (1 / azure_score) if azure_score > 0 else -1.0
+                logger.info(
+                    f"Policy similarity: '{result.get('filename', '?')}' "
+                    f"cosine={cosine_similarity:.4f} (azure={azure_score:.4f}, threshold={threshold})"
+                )
 
-                # Get the actual similarity score from Azure Search
-                # Azure returns scores as @search.score, which is accessible as a property
-                actual_score = getattr(result, '@search.score', 0.0)
-
-                # Normalize the score to 0-1 range if needed
-                # Azure Search scores can vary, but cosine similarity should already be 0-1
-                similarity_score = min(actual_score, 1.0)  # Cap at 1.0 just in case
-
-                if similarity_score >= threshold:
+                if cosine_similarity >= threshold:
                     processed_results.append({
                         "id": result["id"],
                         "filename": result["filename"],
                         "description": result["description"],
                         "source": result["source"],
+                        "web_url": result.get("web_url", ""),
                         "toc": toc,
                         "topic_ids": result.get("topic_ids", []),
-                        "similarity_score": similarity_score,
+                        "similarity_score": cosine_similarity,
                         "rank": i + 1
                     })
-            
+
+            logger.info(f"Policies above cosine threshold {threshold}: {len(processed_results)}/{top_k}")
             return processed_results
             
         except Exception as e:
@@ -343,11 +385,7 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
 
                 # Get the actual similarity score from Azure Search
                 # Azure returns scores as @search.score, which is accessible as a property
-                actual_score = getattr(result, '@search.score', 0.0)
-
-                # Normalize the score to 0-1 range if needed
-                # Azure Search scores can vary, but cosine similarity should already be 0-1
-                similarity_score = min(actual_score, 1.0)  # Cap at 1.0 just in case
+                similarity_score = result.get('@search.score', 0.0)
 
                 if similarity_score >= threshold:
                     processed_results.append({
@@ -479,6 +517,35 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
         except Exception as e:
             logger.error(f"Failed to retrieve all policies: {e}")
             return []
+
+    def delete_policy_by_source(self, source: str) -> bool:
+        """
+        Delete a policy and all its topics by the source identifier.
+        Used by the SharePoint CDC pipeline when a file is removed from the library.
+        """
+        try:
+            results = list(self.search_client.search(
+                search_text="*",
+                filter=f"record_type eq 'policy' and source eq '{source}'",
+                select="id,topic_ids",
+                top=10
+            ))
+            if not results:
+                logger.info(f"No policy found with source '{source}', nothing to delete")
+                return True
+
+            for policy in results:
+                topic_ids = policy.get("topic_ids", [])
+                if topic_ids:
+                    topic_delete_batch = [{"id": tid} for tid in topic_ids]
+                    self.search_client.delete_documents(documents=topic_delete_batch)
+                    logger.info(f"Deleted {len(topic_ids)} topics for policy {policy['id']}")
+                self.search_client.delete_documents(documents=[{"id": policy["id"]}])
+                logger.info(f"Deleted policy {policy['id']} (source: {source})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete policy by source '{source}': {e}")
+            return False
 
     # ============================================================
     # REGULATIONS METHODS

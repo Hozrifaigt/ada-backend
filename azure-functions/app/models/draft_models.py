@@ -84,6 +84,20 @@ class ValidateDraftResponse(BaseModel):
     description_quality_score: int = Field(..., description="Quality score for description (0-100)")
     improved_description: Optional[str] = Field(None, description="Suggested improved description")
 
+class SimilarPolicy(BaseModel):
+    """A similar policy found during draft initialization."""
+    policy_id: str
+    filename: str
+    description: str
+    web_url: str = ""
+    similarity_score: float
+
+
+class ApplyPolicyRequest(BaseModel):
+    """Request to apply a similar policy's TOC to a draft, or generate with AI if policy_id is None."""
+    policy_id: Optional[str] = Field(None, description="Policy ID to apply. None = generate TOC with AI.")
+
+
 class InitializeDraftResponse(BaseModel):
     """Response after initializing a draft."""
     draft_id: str
@@ -91,6 +105,8 @@ class InitializeDraftResponse(BaseModel):
     suggested_toc: List[Dict[str, Any]]
     message: str
     toc_source: Optional[str] = Field(default="similarity_search", description="Source of TOC: similarity_search or ai_generated")
+    needs_policy_selection: bool = Field(default=False, description="True when similar policies were found and user must choose one")
+    similar_policies: List[SimilarPolicy] = Field(default_factory=list, description="Up to 3 similar policies for user to choose from")
 
 
 class DraftSummary(BaseModel):
@@ -216,6 +232,7 @@ class DraftMetadata(BaseModel):
     regulations: str = Field(default="", description="Applicable regulation")
     detail_level: int = Field(default=3, description="Level of detail: 1 (light) to 5 (comprehensive)")
     policy_type: Optional[str] = Field(None, description="Policy type (e.g., 'Leave Policy'). Falls back to title if not set.")
+    uploaded_regulations_text: Optional[str] = Field(None, description="Concatenated text from uploaded regulation files (Review Policy flow)")
 
     @property
     def effective_policy_type(self) -> str:

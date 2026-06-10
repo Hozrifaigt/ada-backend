@@ -279,4 +279,105 @@ async def process_and_index_documents(
             detail=f"Failed to start processing: {str(e)}"
         )
 
+@router.delete("/sync-sharepoint/delta", response_model=AdminResponse)
+def reset_sharepoint_delta(x_admin_api_key: Optional[str] = Header(None)):
+    """
+    Clear the saved delta token so the next sync-sharepoint call does a full
+    re-scan of the entire SharePoint library instead of only fetching changes.
+    Use this after clearing the search index.
+    """
+    if not _validate_admin_api_key(x_admin_api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Admin-API-Key header"
+        )
+
+    if not settings.SHAREPOINT_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SharePoint integration is disabled."
+        )
+
+    from app.services.sync_state_storage import SyncStateStorage
+    SyncStateStorage().reset_delta()
+
+    return AdminResponse(
+        message="Delta token cleared. The next sync-sharepoint call will re-ingest all files.",
+        details={"delta_token_present": False}
+    )
+
+
+@router.get("/sync-sharepoint/status", response_model=AdminResponse)
+def get_sharepoint_sync_status(x_admin_api_key: Optional[str] = Header(None)):
+    """
+    Return the last SharePoint sync time and whether a delta token is stored.
+    """
+    if not _validate_admin_api_key(x_admin_api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Admin-API-Key header"
+        )
+
+    if not settings.SHAREPOINT_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SharePoint integration is disabled."
+        )
+
+    from app.services.sync_state_storage import SyncStateStorage
+    state = SyncStateStorage().get_status()
+
+    return AdminResponse(
+        message="SharePoint sync status retrieved",
+        details={
+            "sharepoint_enabled": settings.SHAREPOINT_ENABLED,
+            "site_url": settings.SHAREPOINT_SITE_URL,
+            "drive": settings.SHAREPOINT_DRIVE_NAME,
+            "folder": settings.SHAREPOINT_FOLDER_PATH or "(root)",
+            **state,
+        }
+    )
+
+
+@router.post("/sync-sharepoint", response_model=AdminResponse)
+async def sync_sharepoint_library(
+    background_tasks: BackgroundTasks,
+    x_admin_api_key: Optional[str] = Header(None)
+):
+    """
+    Trigger a SharePoint CDC sync: fetch only the changed .docx files from the
+    configured SharePoint library and update the Azure Search index accordingly.
+    Uses the Microsoft Graph delta API so only new/modified/deleted files are processed.
+    Runs as a background task.
+    """
+    if not _validate_admin_api_key(x_admin_api_key):
+        logger.warning("SECURITY: Invalid or missing X-Admin-API-Key for SharePoint sync")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Admin-API-Key header"
+        )
+
+    if not settings.SHAREPOINT_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SharePoint integration is disabled. Set SHAREPOINT_ENABLED=true in config."
+        )
+
+    logger.info("Admin triggered SharePoint CDC sync")
+
+    from app.services.sharepoint_sync_service import SharePointSyncService
+    sync_service = SharePointSyncService()
+    background_tasks.add_task(sync_service.run_sync)
+
+    return AdminResponse(
+        message="SharePoint sync started. Processing changes in the background.",
+        details={
+            "site_url": settings.SHAREPOINT_SITE_URL,
+            "drive": settings.SHAREPOINT_DRIVE_NAME,
+            "folder": settings.SHAREPOINT_FOLDER_PATH or "(root)",
+            "status": "Running — check server logs for progress",
+        }
+    )
+
+
 # Excel template endpoints removed - no longer using Excel sheets for policy templates

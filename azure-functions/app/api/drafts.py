@@ -1,7 +1,7 @@
 import logging
 
-from typing import Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, status
+from typing import Dict, Any, Optional, List
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from app.config.settings import settings
@@ -16,6 +16,7 @@ from app.api.policy.dependencies import get_llm, get_vector_store as get_store
 from app.models.draft_models import (
     InitializeDraftRequest,
     InitializeDraftResponse,
+    ApplyPolicyRequest,
     ValidateDraftRequest,
     ValidateDraftResponse,
     UpdateTOCRequest,
@@ -28,7 +29,8 @@ from app.models.draft_models import (
     DraftProgress,
     TopicContext,
     ContentGenerationResponse,
-    CritiqueResponse
+    CritiqueResponse,
+    SimilarPolicy
 )
 from app.models.toc_chat_models import (
     TOCChatMessage,
@@ -129,6 +131,8 @@ async def initialize_draft_endpoint(
             client_metadata=request.client_metadata,
             function=request.function,
             llm_service=get_llm(),
+            vector_store=get_store(),
+            description=request.description,
             client_specific_requests=request.client_specific_requests,
             sector_specific_comments=request.sector_specific_comments,
             regulations=request.regulations,
@@ -141,7 +145,9 @@ async def initialize_draft_endpoint(
                 similar_policies_found=result["similar_policies_found"],
                 suggested_toc=result["draft"]["toc"],
                 message="Draft initialized successfully",
-                toc_source=result.get("toc_source", "ai_generated")
+                toc_source=result.get("toc_source", "ai_generated"),
+                needs_policy_selection=result.get("needs_policy_selection", False),
+                similar_policies=[SimilarPolicy(**p) for p in result.get("similar_policies", [])]
             )
         else:
             raise HTTPException(
@@ -157,6 +163,125 @@ async def initialize_draft_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+@router.post("/initialize-from-upload", response_model=InitializeDraftResponse)
+async def initialize_draft_from_upload_endpoint(
+    title: str = Form(...),
+    function: str = Form(...),
+    client_name: str = Form(...),
+    client_country: str = Form(...),
+    client_city: str = Form(...),
+    client_industry: str = Form(...),
+    client_specific_requests: Optional[str] = Form(None),
+    sector_specific_comments: Optional[str] = Form(None),
+    regulations: str = Form(""),
+    detail_level: int = Form(3),
+    policy_file: UploadFile = File(...),
+    previous_policy_file: Optional[UploadFile] = File(None),
+    regulations_files: Optional[List[UploadFile]] = File(None),
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Initialize a new draft from an uploaded .docx policy file.
+    The document's structure (TOC and content) becomes the starting point for the draft.
+    """
+    logger.info(f"Upload-based draft initialization requested by user: {current_user.get('email')}")
+
+    if not policy_file.filename.endswith(".docx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .docx files are supported"
+        )
+
+    try:
+        from app.models.draft_models import ClientMetadata
+
+        raw_name = current_user.get('name', current_user.get('email'))
+        clean_name = raw_name.split('-')[0].strip() if raw_name and '-' in raw_name else raw_name
+
+        file_bytes = await policy_file.read()
+
+        client_metadata = ClientMetadata(
+            name=client_name,
+            country=client_country,
+            city=client_city,
+            industry=client_industry
+        )
+
+        previous_policy_bytes = await previous_policy_file.read() if previous_policy_file else None
+        regulations_bytes_list = []
+        if regulations_files:
+            for rf in regulations_files:
+                regulations_bytes_list.append((rf.filename, await rf.read()))
+
+        result = await draft_service.initialize_draft_from_upload(
+            file_bytes=file_bytes,
+            filename=policy_file.filename,
+            title=title,
+            user_id=clean_name,
+            client_metadata=client_metadata,
+            function=function,
+            client_specific_requests=client_specific_requests,
+            sector_specific_comments=sector_specific_comments,
+            regulations=regulations,
+            detail_level=detail_level,
+            previous_policy_bytes=previous_policy_bytes,
+            previous_policy_filename=previous_policy_file.filename if previous_policy_file else None,
+            regulations_files=regulations_bytes_list
+        )
+
+        if result:
+            return InitializeDraftResponse(
+                draft_id=result["draft_id"],
+                similar_policies_found=0,
+                suggested_toc=result["draft"]["toc"],
+                message="Draft initialized from uploaded policy",
+                toc_source="uploaded_policy"
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to initialize draft from uploaded file"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initialize draft from upload: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/{draft_id}/apply-policy")
+async def apply_policy_to_draft(
+    draft_id: str,
+    request: ApplyPolicyRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Apply a selected similar policy's TOC to a draft, or generate the TOC with AI.
+    Called after the user picks a policy from the selection screen.
+    Pass policy_id=null to skip selection and generate with AI instead.
+    """
+    success = await draft_service.apply_policy_toc(
+        draft_id=draft_id,
+        policy_id=request.policy_id,
+        vector_store=get_store(),
+        llm_service=get_llm()
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to apply policy TOC to draft"
+        )
+    return {"message": "TOC applied successfully", "draft_id": draft_id}
+
 
 @router.get("/", response_model=DraftListResponse)
 async def list_drafts(

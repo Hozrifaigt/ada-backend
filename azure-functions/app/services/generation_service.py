@@ -172,17 +172,38 @@ class ContentGenerationService:
             )
 
             # Step 10: Generate content (with regulations context if available)
-            content = await self._generate_from_scratch(
-                title=topic_title,
-                user_prompt=user_prompt,
-                sequential_context=sequential_context,
-                draft_metadata=draft.metadata,
-                conversation_history="",
-                llm_service=llm_service,
-                full_toc=full_toc,
-                regulation_chunks=regulation_chunks,
-                topic_structure_guidance=topic_structure_guidance
-            )
+            # If this draft was started from an uploaded policy, adapt the existing content
+            # instead of generating from scratch
+            existing_uploaded_content = None
+            if draft.metadata.toc_source == "uploaded_policy":
+                if subtopic_id and subtopic_item:
+                    existing_uploaded_content = subtopic_item.content or None
+                elif not subtopic_id:
+                    existing_uploaded_content = toc_item.content or None
+
+            if existing_uploaded_content:
+                content = await self._adapt_existing_content(
+                    existing_content=existing_uploaded_content,
+                    user_prompt=user_prompt,
+                    draft=draft,
+                    topic_id=topic_id,
+                    subtopic_id=subtopic_id,
+                    conversation_history="",
+                    llm_service=llm_service,
+                    regulation_chunks=regulation_chunks
+                )
+            else:
+                content = await self._generate_from_scratch(
+                    title=topic_title,
+                    user_prompt=user_prompt,
+                    sequential_context=sequential_context,
+                    draft_metadata=draft.metadata,
+                    conversation_history="",
+                    llm_service=llm_service,
+                    full_toc=full_toc,
+                    regulation_chunks=regulation_chunks,
+                    topic_structure_guidance=topic_structure_guidance
+                )
             source_ids = []
 
             # Step 11: Reflection & Critique (if agent available)
@@ -443,7 +464,8 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         topic_id: str,
         subtopic_id: Optional[str],
         conversation_history: str,
-        llm_service
+        llm_service,
+        regulation_chunks: List[RegulationChunk] = None
     ) -> str:
         """Adapt existing content based on user requirements and context."""
 
@@ -453,6 +475,13 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
 
         # Format the full TOC for context
         full_toc = self._format_full_toc(draft.toc)
+
+        # Format regulations — include Azure Search results and uploaded regulation files
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
+        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
+        if uploaded_regs:
+            sep = "\n\n" if regulations_context else ""
+            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
 
         # Use prompt manager
         prompt = self.prompt_manager.get_prompt(
@@ -465,6 +494,7 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             client_specific_requests=draft.metadata.client_specific_requests or "",
             sector_specific_comments=draft.metadata.sector_specific_comments or "",
             regulations=draft.metadata.regulations or "",
+            regulations_context=regulations_context,
             detail_level=self._map_detail_level(draft.metadata.detail_level),
             full_table_of_contents=full_toc,
             previous_topics=self._format_context_for_prompt(sequential_context),
