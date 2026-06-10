@@ -45,11 +45,11 @@ class AzureEmbedder:
                     continue
                 else:
                     logger.error(f"Failed to generate embeddings after {max_retries + 1} attempts: {e}")
-                    raise RuntimeError("Embedding generation failed after retries") from e
+                    raise RuntimeError(f"Embedding failed after retries: {type(e).__name__}: {e}") from e
 
             except Exception as e:
                 logger.error(f"Failed to generate embedding: {e}")
-                raise RuntimeError("Embedding generation failed") from e
+                raise RuntimeError(f"Embedding failed: {type(e).__name__}: {e}") from e
     
     def embed_query(self, text: str) -> List[float]:
         logger.debug(f"Generating embedding for query: '{text[:50]}...'")

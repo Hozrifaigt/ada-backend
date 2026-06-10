@@ -38,11 +38,7 @@ async def index_regulations():
         vector_store = AzureVectorStore(embedder=embedder)
 
         # Initialize regulations processor
-        regulations_dir = settings.REGULATIONS_PATH
-        logger.info(f"Regulations directory: {regulations_dir}")
-
         processor = RegulationsProcessor(
-            regulations_dir=regulations_dir,
             embedder=embedder,
             vector_store=vector_store
         )
