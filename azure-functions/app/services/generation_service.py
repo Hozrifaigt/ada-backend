@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +8,7 @@ from app.prompts.manager import PromptManager
 from app.services.query_classification_service import QueryClassificationService, create_classification_service
 from app.services.reflection_agent import ReflectionAgent, ReflectionCritique
 from app.models.classification_models import QueryCategory
-from app.models.draft_models import CompleteDraft, DraftMetadata
+from app.models.draft_models import CompleteDraft, DraftMetadata, GapReport, GapFinding
 from app.models.regulation_models import RegulationChunk
 from app.config.settings import settings
 
@@ -505,6 +506,238 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
 
         response = await llm_service.generate(prompt)
         return response.strip()
+
+
+    # ============================================================
+    # GAP ASSESSMENT (Review Policy / review_mode)
+    # ============================================================
+
+    def _parse_json_object(self, response: str) -> Dict[str, Any]:
+        """Parse a JSON object from an LLM response, tolerating markdown fences / extra prose."""
+        text = (response or "").strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end > start:
+                return json.loads(text[start:end + 1])
+            raise
+
+    def _format_findings_for_prompt(self, findings: List[Dict[str, Any]]) -> str:
+        """Format confirmed gap findings as an instruction list for the apply prompt."""
+        if not findings:
+            return "(No changes confirmed.)"
+        lines = []
+        for i, f in enumerate(findings, 1):
+            lines.append(
+                f"{i}. [{f.get('type', '')}/{f.get('source', '')}] {f.get('description', '')}\n"
+                f"   Apply: {f.get('suggested_change', '')}"
+            )
+        return "\n".join(lines)
+
+    async def generate_gap_report(
+        self,
+        topic_id: str,
+        topic_title: str,
+        existing_content: str,
+        benchmark_content: Optional[str],
+        draft,
+        previous_policy_excerpt: str,
+        llm_service,
+        regulation_chunks: List[RegulationChunk] = None,
+        benchmark_topic_name: Optional[str] = None,
+        surrounding_context: str = "",
+    ) -> GapReport:
+        """Compare a client topic's content against the benchmark + regulations and return a structured gap report."""
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
+        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
+        if uploaded_regs:
+            sep = "\n\n" if regulations_context else ""
+            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
+
+        prompt = self.prompt_manager.get_prompt(
+            "gap_assessment",
+            topic_title=topic_title,
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            client_specific_requests=draft.metadata.client_specific_requests or "",
+            sector_specific_comments=draft.metadata.sector_specific_comments or "",
+            detail_level=self._map_detail_level(draft.metadata.detail_level),
+            existing_content=existing_content or "(This topic has no client content yet.)",
+            benchmark_content=benchmark_content or "None available",
+            regulations_context=regulations_context or "None available",
+            previous_policy_excerpt=previous_policy_excerpt or "None available",
+            surrounding_context=surrounding_context or "None",
+        )
+
+        response = await llm_service.generate(prompt)
+        try:
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse gap report JSON for topic '{topic_title}': {e}")
+            logger.error(f"LLM response: {response[:500]}")
+            data = {"findings": [], "overall_summary": "Gap assessment could not be parsed."}
+
+        findings: List[GapFinding] = []
+        for f in data.get("findings", []):
+            try:
+                findings.append(GapFinding(
+                    type=str(f.get("type", "enhancement")),
+                    source=str(f.get("source", "benchmark")),
+                    severity=str(f.get("severity", "medium")),
+                    description=str(f.get("description", "")).strip(),
+                    suggested_change=str(f.get("suggested_change", "")).strip(),
+                ))
+            except Exception as e:
+                logger.warning(f"Skipping malformed gap finding: {e}")
+
+        return GapReport(
+            topic_id=topic_id,
+            findings=findings,
+            benchmark_topic_matched=benchmark_topic_name,
+            overall_summary=str(data.get("overall_summary", "")).strip(),
+        )
+
+    async def apply_gap_to_content(
+        self,
+        existing_content: str,
+        benchmark_content: Optional[str],
+        confirmed_findings: List[Dict[str, Any]],
+        draft,
+        topic_id: str,
+        subtopic_id: Optional[str],
+        conversation_history: str,
+        llm_service,
+        regulation_chunks: List[RegulationChunk] = None,
+    ) -> str:
+        """Apply confirmed gap findings to a topic's existing content while preserving the baseline."""
+        sequential_context = self._build_sequential_context(draft, topic_id, subtopic_id)
+        full_toc = self._format_full_toc(draft.toc)
+
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
+        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
+        if uploaded_regs:
+            sep = "\n\n" if regulations_context else ""
+            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
+
+        prompt = self.prompt_manager.get_prompt(
+            "adapt_with_gap",
+            document_title=draft.metadata.title,
+            document_description=draft.metadata.description or "",
+            function=draft.metadata.function,
+            industry=draft.metadata.client_metadata.industry,
+            client_specific_requests=draft.metadata.client_specific_requests or "",
+            sector_specific_comments=draft.metadata.sector_specific_comments or "",
+            regulations=draft.metadata.regulations or "",
+            regulations_context=regulations_context,
+            detail_level=self._map_detail_level(draft.metadata.detail_level),
+            full_table_of_contents=full_toc,
+            previous_topics=self._format_context_for_prompt(sequential_context),
+            benchmark_content=benchmark_content or "None available",
+            existing_content=existing_content,
+            confirmed_findings=self._format_findings_for_prompt(confirmed_findings),
+            review_intensity=getattr(draft.metadata, "review_intensity", "preserve") or "preserve",
+        )
+
+        response = await llm_service.generate(prompt)
+        return response.strip()
+
+    def _format_topics_for_reconcile(self, topics: List[Dict[str, Any]], snippet_chars: int = 400) -> str:
+        """Format client/benchmark topics (title + short content snippet) for the reconcile prompt."""
+        if not topics:
+            return "(none)"
+        lines = []
+        for t in topics:
+            title = (t.get("topic") or t.get("name") or t.get("title") or "").strip()
+            if not title:
+                continue
+            content = (t.get("topic_content") or t.get("content") or "").strip()
+            snippet = content[:snippet_chars].replace("\n", " ")
+            lines.append(f"- {title}" + (f": {snippet}…" if snippet else ""))
+        return "\n".join(lines) if lines else "(none)"
+
+    def _assemble_full_policy_text(self, draft) -> str:
+        """Ordered title+content over all topics/subtopics, for a whole-policy pass."""
+        parts = []
+        for i, t in enumerate(draft.toc, 1):
+            parts.append(f"## {i}. {t.topic}\n{(t.content or '').strip()}")
+            for j, s in enumerate(t.subtopics, 1):
+                parts.append(f"### {i}.{j} {s.topic}\n{(s.content or '').strip()}")
+        return "\n\n".join(parts).strip()
+
+    async def run_consistency_check(self, draft, llm_service) -> Dict[str, Any]:
+        """Whole-policy consistency pass → parsed issues dict."""
+        full = self._assemble_full_policy_text(draft)
+        cap = 48000  # ~12k tokens; map-reduce over sections is a future enhancement for larger policies
+        text = full if len(full) <= cap else full[:cap]
+        if len(full) > cap:
+            logger.warning(f"Consistency check truncated policy text from {len(full)} to {cap} chars")
+        prompt = self.prompt_manager.get_prompt(
+            "policy_consistency",
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            policy_text=text,
+        )
+        response = await llm_service.generate(prompt)
+        try:
+            return self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse consistency JSON: {e}")
+            return {"issues": [], "summary": "Consistency check could not be parsed."}
+
+    async def generate_gap_summary_narrative(self, draft, summary, llm_service) -> str:
+        """Write the executive-summary narrative for a gap-assessment review."""
+        rollup = (
+            f"Units reviewed: {summary.total_units} (applied {summary.applied}, assessed {summary.assessed}, "
+            f"pending {summary.pending}). Findings: {summary.total_findings} "
+            f"(severity {summary.by_severity}, type {summary.by_type}, source {summary.by_source}). "
+            f"Benchmark-matched units: {summary.benchmark_coverage}. "
+            f"Baseline preserved: {summary.pct_preserved if summary.pct_preserved is not None else 'n/a'}%."
+        )
+        highlights = "\n".join(
+            f"- {t.title} ({t.status}): {t.overall_summary}" for t in summary.topics if t.overall_summary
+        )[:4000]
+        prompt = self.prompt_manager.get_prompt(
+            "gap_summary_narrative",
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            rollup=rollup,
+            highlights=highlights or "None",
+        )
+        response = await llm_service.generate(prompt)
+        return response.strip()
+
+    async def reconcile_toc(
+        self,
+        client_topics: List[Dict[str, Any]],
+        benchmark_topics: List[Dict[str, Any]],
+        draft_metadata,
+        llm_service,
+    ) -> Dict[str, Any]:
+        """Ask the LLM to decide the final TOC and the client<->benchmark mapping. Returns parsed dict."""
+        prompt = self.prompt_manager.get_prompt(
+            "reconcile_toc",
+            title=draft_metadata.title,
+            function=draft_metadata.function,
+            industry=draft_metadata.client_metadata.industry,
+            regulations=draft_metadata.regulations or "",
+            client_specific_requests=draft_metadata.client_specific_requests or "",
+            sector_specific_comments=draft_metadata.sector_specific_comments or "",
+            detail_level=self._map_detail_level(draft_metadata.detail_level),
+            review_intensity=getattr(draft_metadata, "review_intensity", "preserve") or "preserve",
+            client_topics=self._format_topics_for_reconcile(client_topics),
+            benchmark_topics=self._format_topics_for_reconcile(benchmark_topics),
+        )
+
+        response = await llm_service.generate(prompt)
+        try:
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse reconcile_toc JSON: {e}")
+            logger.error(f"LLM response: {response[:500]}")
+            raise
+        return data
 
 
     async def _generate_with_references(

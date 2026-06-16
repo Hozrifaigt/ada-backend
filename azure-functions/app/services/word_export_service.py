@@ -180,6 +180,63 @@ class WordExportService:
             # Add spacing between topics
             doc.add_paragraph()
     
+    def export_gap_summary(self, summary: Dict[str, Any], metadata: Dict[str, Any]) -> BytesIO:
+        """Build a client-facing Gap Assessment Summary .docx from a GapSummary dict."""
+        try:
+            doc = Document()
+            self._setup_styles(doc)
+
+            title = doc.add_heading(f"{metadata.get('title', 'Policy')} — Gap Assessment Summary", 0)
+            title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            doc.add_paragraph()
+
+            # Executive narrative
+            if summary.get('narrative'):
+                doc.add_heading('Executive Summary', level=1)
+                for para in summary['narrative'].split('\n'):
+                    if para.strip():
+                        doc.add_paragraph(para.strip())
+
+            # Rollup
+            doc.add_heading('Overview', level=1)
+            pct = summary.get('pct_preserved')
+            rollup_lines = [
+                f"Sections reviewed: {summary.get('total_units', 0)} "
+                f"(applied {summary.get('applied', 0)}, assessed {summary.get('assessed', 0)}, pending {summary.get('pending', 0)})",
+                f"Total findings: {summary.get('total_findings', 0)}",
+                f"By severity: {summary.get('by_severity', {})}",
+                f"By type: {summary.get('by_type', {})}",
+                f"By source: {summary.get('by_source', {})}",
+                f"Benchmark-matched sections: {summary.get('benchmark_coverage', 0)}",
+                f"Baseline preserved: {pct if pct is not None else 'n/a'}%",
+            ]
+            for line in rollup_lines:
+                doc.add_paragraph(line, style='List Bullet')
+
+            # Per-section findings
+            doc.add_heading('Findings by section', level=1)
+            for t in summary.get('topics', []):
+                if not t.get('findings'):
+                    continue
+                doc.add_heading(f"{t['title']} [{t.get('status', 'pending')}]", level=2)
+                if t.get('overall_summary'):
+                    doc.add_paragraph(t['overall_summary'])
+                for f in t.get('findings', []):
+                    p = doc.add_paragraph(style='List Bullet')
+                    p.add_run(f"[{f.get('severity', '')}/{f.get('type', '')}] ").bold = True
+                    p.add_run(f.get('description', ''))
+                    if f.get('suggested_change'):
+                        sub = doc.add_paragraph(f"Change: {f['suggested_change']}")
+                        sub.paragraph_format.left_indent = Inches(0.5)
+
+            doc_stream = BytesIO()
+            doc.save(doc_stream)
+            doc_stream.seek(0)
+            return doc_stream
+        except Exception as e:
+            logger.error(f"Failed to export gap summary to Word: {e}")
+            raise ValueError(f"Gap summary export failed: {str(e)}")
+
     def get_filename(self, draft_data: Dict[str, Any]) -> str:
         """
         Generate a filename for the Word export.

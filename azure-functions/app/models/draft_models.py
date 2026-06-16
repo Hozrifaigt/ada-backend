@@ -156,6 +156,126 @@ class CritiqueResponse(BaseModel):
     fixed_content: Optional[str] = Field(None, description="Auto-improved content if revision was performed")
 
 
+class GapFinding(BaseModel):
+    """A single gap-assessment finding for a topic."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Stable id used as the checklist key")
+    type: str = Field(..., description="missing | non_compliant | enhancement")
+    source: str = Field(..., description="benchmark | regulation | previous")
+    severity: str = Field(default="medium", description="high | medium | low")
+    description: str = Field(..., description="What the gap is")
+    suggested_change: str = Field(..., description="The concrete change to apply")
+
+
+class GapReport(BaseModel):
+    """Gap assessment of one client topic vs the benchmark + regulations."""
+    topic_id: str
+    findings: List[GapFinding] = Field(default_factory=list)
+    benchmark_topic_matched: Optional[str] = Field(None, description="Name of the benchmark topic used for comparison")
+    overall_summary: str = Field(default="", description="Short narrative summary of the gaps")
+
+
+class GapReportResponse(BaseModel):
+    """Response after generating a topic gap report."""
+    gap_report: GapReport
+    message: str
+
+
+class ApplyGapRequest(BaseModel):
+    """Request to apply confirmed gap findings to a topic."""
+    confirmed_finding_ids: List[str] = Field(default_factory=list, description="Finding ids the reviewer kept")
+    edited_findings: Optional[List[GapFinding]] = Field(None, description="Reviewer-edited findings (overrides matching ids)")
+    preview: bool = Field(default=False, description="Generate the proposed rewrite without persisting (preview step)")
+    final_content: Optional[str] = Field(None, description="Reviewer-approved content to commit directly (confirm step); skips LLM generation")
+    subtopic_id: Optional[str] = Field(None, description="Target subtopic; when set the gap unit is the subtopic, not the topic")
+
+
+class BatchUnitRef(BaseModel):
+    """Reference to a gap unit (topic, or one of its subtopics)."""
+    topic_id: str
+    subtopic_id: Optional[str] = None
+
+
+class AssessBatchRequest(BaseModel):
+    """Request to assess several units in one call (server-side parallel)."""
+    units: List[BatchUnitRef] = Field(default_factory=list)
+
+
+class ApplyGapResponse(BaseModel):
+    """Response after applying confirmed gap findings to a topic."""
+    content: str
+    summary: str = ""
+    word_count: int = 0
+    message: str
+
+
+class ConsistencyIssue(BaseModel):
+    """A single whole-policy consistency issue."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    type: str = Field(..., description="contradiction | terminology | duplicate | undefined_term | cross_reference")
+    severity: str = Field(default="medium", description="high | medium | low")
+    description: str = ""
+    locations: List[str] = Field(default_factory=list, description="Section titles involved")
+    suggestion: str = ""
+
+
+class ConsistencyReport(BaseModel):
+    """Result of a whole-policy consistency pass."""
+    issues: List[ConsistencyIssue] = Field(default_factory=list)
+    summary: str = ""
+    generated_at: str = ""
+
+
+class GapSummaryTopic(BaseModel):
+    """Per-unit entry in the gap summary."""
+    title: str
+    status: str = "pending"
+    findings_count: int = 0
+    overall_summary: str = ""
+    findings: List[GapFinding] = Field(default_factory=list)
+
+
+class GapSummary(BaseModel):
+    """Aggregated, client-facing summary of a gap-assessment review."""
+    narrative: str = ""
+    total_units: int = 0
+    assessed: int = 0
+    applied: int = 0
+    pending: int = 0
+    benchmark_coverage: int = 0
+    pct_preserved: Optional[float] = None
+    total_findings: int = 0
+    by_severity: Dict[str, int] = Field(default_factory=dict)
+    by_type: Dict[str, int] = Field(default_factory=dict)
+    by_source: Dict[str, int] = Field(default_factory=dict)
+    topics: List[GapSummaryTopic] = Field(default_factory=list)
+
+
+class DraftVersion(BaseModel):
+    """Metadata for a saved draft snapshot (content not included)."""
+    version_id: str
+    created_at: str
+    created_by: str = ""
+    label: str = ""
+    reason: str = ""
+    size: int = 0
+
+
+class AuditEntry(BaseModel):
+    """A single audit-trail entry for a draft."""
+    ts: str
+    actor: str = ""
+    action: str
+    target_id: str = ""
+    target_title: str = ""
+    summary: str = ""
+
+
+class SaveVersionRequest(BaseModel):
+    """Request to snapshot the current draft as a version."""
+    label: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class ContentGenerationResponse(BaseModel):
     """Response after content generation."""
     content: str = Field(..., description="Generated content")
@@ -179,6 +299,12 @@ class TOCTopic(BaseModel):
     summary: str = Field(default="", description="Summary if content > 150 words")
     conversation_history: List['ConversationEntry'] = Field(default_factory=list, description="Conversation history for this topic")
     subtopics: List['TOCSubtopic'] = Field(default_factory=list)
+    # Gap-assessment review fields (Review Policy / review_mode drafts)
+    gap_report_json: Optional[str] = Field(None, description="Serialized GapReport for this topic")
+    gap_status: str = Field(default="pending", description="Gap review status: pending | assessed | applied")
+    added_from_benchmark: bool = Field(default=False, description="True if this topic was auto-added because the client policy lacked it")
+    benchmark_match: Optional[str] = Field(None, description="Benchmark section this topic maps to (set at TOC reconciliation, reused by gap-report)")
+    reconcile_note: Optional[str] = Field(None, description="Short rationale for a reconciliation merge/rename/add")
 
 
 class TOCSubtopic(BaseModel):
@@ -190,6 +316,10 @@ class TOCSubtopic(BaseModel):
     content: str = Field(default="", description="Generated content for this subtopic")
     summary: str = Field(default="", description="Summary if content > 150 words")
     conversation_history: List['ConversationEntry'] = Field(default_factory=list, description="Conversation history for this subtopic")
+    # Gap-assessment review fields (per-subtopic gap units)
+    gap_report_json: Optional[str] = Field(None, description="Serialized GapReport for this subtopic")
+    gap_status: str = Field(default="pending", description="Gap review status: pending | assessed | applied")
+    benchmark_match: Optional[str] = Field(None, description="Benchmark subtopic this subtopic maps to")
 
 
 class ConversationEntry(BaseModel):
@@ -233,6 +363,15 @@ class DraftMetadata(BaseModel):
     detail_level: int = Field(default=3, description="Level of detail: 1 (light) to 5 (comprehensive)")
     policy_type: Optional[str] = Field(None, description="Policy type (e.g., 'Leave Policy'). Falls back to title if not set.")
     uploaded_regulations_text: Optional[str] = Field(None, description="Concatenated text from uploaded regulation files (Review Policy flow)")
+    previous_policy_text: Optional[str] = Field(None, description="Full text of the previous client policy (Review Policy flow)")
+    # Gap-assessment review fields
+    review_mode: bool = Field(default=False, description="True = topic-by-topic gap review draft")
+    benchmark_policy_id: Optional[str] = Field(None, description="Library policy_id used as the good-standard benchmark")
+    benchmark_source: Optional[str] = Field(None, description="Where the benchmark came from: library | uploaded")
+    benchmark_topics_json: Optional[str] = Field(None, description="Serialized parsed topics when the benchmark is an uploaded file")
+    review_intensity: str = Field(default="preserve", description="How much the review may change the policy: preserve (keep >=50-60% baseline) | rebuild (heavy rewrite for weak policies)")
+    toc_reconciliation_note: Optional[str] = Field(None, description="LLM hint from TOC reconciliation (e.g. 'policy looks light, consider Rebuild')")
+    consistency_report_json: Optional[str] = Field(None, description="Serialized last whole-policy ConsistencyReport")
 
     @property
     def effective_policy_type(self) -> str:

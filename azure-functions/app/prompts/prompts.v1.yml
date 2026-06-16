@@ -204,6 +204,219 @@ adapt_existing_content:
 
     ADAPTED CONTENT:
 
+policy_consistency:
+  template: |
+    You are a senior policy reviewer doing a WHOLE-DOCUMENT consistency pass on a policy.
+    Read the full policy below and find issues that are only visible across sections:
+    - "contradiction": two sections state conflicting rules/values.
+    - "terminology": the same concept is named inconsistently across sections.
+    - "duplicate": the same clause/requirement is repeated in multiple sections.
+    - "undefined_term": a term is used but never defined.
+    - "cross_reference": a section refers to another that is missing or mislabeled.
+
+    Only report genuine, specific issues. Cite the section titles involved in "locations".
+
+    POLICY: {document_title}
+    INDUSTRY: {industry}
+
+    FULL POLICY (sections with ## / ### headings):
+    {policy_text}
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "issues": [
+        {{"type": "contradiction", "severity": "high", "description": "...", "locations": ["1. Title", "4. Title"], "suggestion": "..."}}
+      ],
+      "summary": "One or two sentences on overall consistency."
+    }}
+
+gap_summary_narrative:
+  template: |
+    You are a senior policy consultant writing the executive summary of a policy GAP-ASSESSMENT REVIEW
+    for the client. Write 2-4 short paragraphs, professional and factual, summarizing what the review
+    covered, the main gaps addressed (by theme/severity), regulation alignment, and that the client's
+    baseline was largely preserved. Do not invent numbers beyond those given.
+
+    POLICY: {document_title}
+    INDUSTRY: {industry}
+
+    ROLLUP (facts you may cite):
+    {rollup}
+
+    PER-SECTION HIGHLIGHTS:
+    {highlights}
+
+    Return ONLY the narrative prose (no headings, no JSON).
+
+reconcile_toc:
+  template: |
+    You are a senior policy consultant deciding the final Table of Contents for a CLIENT POLICY REVIEW.
+    You are reviewing the client's existing policy against a good-standard benchmark - NOT writing from scratch.
+
+    POLICY CONTEXT:
+    Title: {title}
+    Function: {function}
+    Industry: {industry}
+    Applicable Regulations: {regulations}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
+    Detail Level: {detail_level}
+
+    REVIEW INTENSITY: {review_intensity}
+    - "preserve" (DEFAULT): The client must still recognize their own policy. KEEP every client topic.
+      Only ADD benchmark sections that are genuinely missing. You may merge clear duplicates and lightly
+      rename for clarity, but never drop a client topic and never restructure aggressively. Aim to change
+      no more than ~40-50% of the structure.
+    - "rebuild": The client policy is weak or light and we have agreed to change most of it. You may freely
+      restructure toward the benchmark good-standard, including dropping, splitting, or merging client topics.
+
+    CLIENT POLICY TOPICS (the baseline; title + a short content snippet each):
+    {client_topics}
+
+    GOOD-STANDARD BENCHMARK TOPICS (reference for what a strong policy covers):
+    {benchmark_topics}
+
+    INSTRUCTIONS:
+    1. Produce the final ordered list of topics for this policy review, honoring the REVIEW INTENSITY above.
+    2. For each final topic record where it came from and how it maps to the benchmark:
+       - "title": the final topic title
+       - "source": "client" (from the client policy), "benchmark" (added because the client lacked it), or "both" (a client topic that also maps to a benchmark section)
+       - "client_match": the exact client topic title it is based on, or null
+       - "benchmark_match": the exact benchmark topic title it maps to, or null
+       - "note": a SHORT rationale only when you merged, renamed, or added something (else "")
+    3. Also judge the overall client policy: is it weak/light enough that a heavier rebuild would help?
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "final_toc": [
+        {{"title": "...", "source": "client", "client_match": "...", "benchmark_match": null, "note": ""}}
+      ],
+      "assessment": {{"weak": false, "summary": "One sentence; if weak, say which areas and that Rebuild may help."}}
+    }}
+
+gap_assessment:
+  template: |
+    You are a senior policy reviewer performing a GAP ASSESSMENT of a client's existing policy topic.
+
+    Your job is NOT to rewrite the policy. It is to identify, for this ONE topic, what is:
+    - MISSING compared to the good-standard benchmark,
+    - NON-COMPLIANT with the applicable regulations, or
+    - a clear ENHANCEMENT opportunity (sub-par practice).
+
+    CRITICAL PHILOSOPHY - PRESERVE THE CLIENT'S BASELINE:
+    The client must still recognize their own policy. Do NOT flag content that is already adequate and compliant.
+    Only report genuine gaps. Aim to change no more than ~40-50% of the baseline; flag more only if the topic is
+    genuinely weak, light, or non-compliant.
+
+    TOPIC BEING ASSESSED: {topic_title}
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Industry: {industry}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
+    Detail Level: {detail_level}
+
+    CLIENT'S EXISTING CONTENT (the BASELINE to preserve):
+    {existing_content}
+
+    GOOD-STANDARD BENCHMARK CONTENT (reference for good practice; may say "None available"):
+    {benchmark_content}
+
+    APPLICABLE REGULATION SECTIONS (mandatory compliance; may be empty):
+    {regulations_context}
+
+    PREVIOUS CLIENT POLICY EXCERPT (for continuity; may be empty):
+    {previous_policy_excerpt}
+
+    ALREADY COVERED ELSEWHERE IN THIS TOPIC (read-only context; may say "None"):
+    The following parent-topic intro and sibling subsections are part of the same topic. They are NOT
+    being assessed here — treat them only as context so you don't duplicate or contradict them:
+    {surrounding_context}
+
+    INSTRUCTIONS:
+    1. Compare the client's existing content against the benchmark and regulations.
+    2. Produce a list of findings. Each finding must be specific and actionable.
+    3. For each finding provide:
+       - "type": one of "missing", "non_compliant", "enhancement"
+       - "source": one of "benchmark", "regulation", "previous"
+       - "severity": one of "high", "medium", "low" (regulation non-compliance is usually high)
+       - "description": what the gap is, in one or two sentences
+       - "suggested_change": the concrete change to apply to the client's content
+    4. If the existing content is already strong and compliant, return an empty findings list.
+    5. Do NOT suggest rewriting compliant, adequate content.
+    6. Do NOT flag something as missing or suggest adding it if it is already covered in the
+       "ALREADY COVERED ELSEWHERE IN THIS TOPIC" context — assess ONLY the target content above.
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "findings": [
+        {{"type": "missing", "source": "benchmark", "severity": "medium", "description": "...", "suggested_change": "..."}}
+      ],
+      "overall_summary": "One or two sentences summarizing the gaps for this topic."
+    }}
+
+adapt_with_gap:
+  template: |
+    You are revising a client's existing policy topic by applying ONLY a set of confirmed gap changes.
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Description: {document_description}
+    Function: {function}
+    Industry: {industry}
+    Client-Specific Requests: {client_specific_requests}
+    Sector-Specific Comments: {sector_specific_comments}
+    Applicable Regulations: {regulations}
+    Detail Level: {detail_level}
+
+    DETAIL LEVEL GUIDANCE:
+    Based on the detail level specified, follow this philosophy:
+
+    | Concept | Light (1-2) | Moderate (3) | Heavy (4-5) |
+    |---------|-------------|--------------|-------------|
+    | Philosophy | Trust & Empowerment | Balanced Approach | Control & Compliance |
+    | Focus | Why (Outcomes & Principles) | Mix of Why and How | How (Procedures & Rules) |
+    | Style | Short, high-level | Moderate detail | Long, granular, step-by-step |
+
+    Apply the detail level ({detail_level}) to determine prescriptiveness, length, and granularity.
+
+    FULL TABLE OF CONTENTS:
+    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    {full_table_of_contents}
+
+    PREVIOUS TOPICS SUMMARY:
+    {previous_topics}
+
+    RELEVANT REGULATION SECTIONS:
+    {regulations_context}
+
+    GOOD-STANDARD BENCHMARK CONTENT (reference only - do not copy verbatim):
+    {benchmark_content}
+
+    CLIENT'S EXISTING CONTENT (the BASELINE - preserve as much as possible):
+    {existing_content}
+
+    CONFIRMED GAP CHANGES TO APPLY (apply ONLY these):
+    {confirmed_findings}
+
+    REVIEW INTENSITY: {review_intensity}
+    - "preserve" (DEFAULT): keep >=50-60% of the client's original wording. Change no more than ~40-50% of the
+      baseline. Touch only the sentences targeted by a confirmed change; leave everything else verbatim.
+    - "rebuild": the policy is weak/light and we agreed to change most of it; you may rewrite this topic broadly
+      to a strong standard while still applying the confirmed changes.
+
+    CRITICAL INSTRUCTIONS:
+    1. PRESERVE the client's existing baseline content per the REVIEW INTENSITY above. The client must still recognize their own policy (especially in "preserve").
+    2. Apply ONLY the confirmed gap changes listed above. In "preserve", do not rewrite sentences that are not targeted by a confirmed change.
+    3. Do NOT introduce changes that were not confirmed, even if you notice other potential improvements.
+    4. When a change cites a regulation, use inline citations with the EXACT article numbers from the regulation sections above. Do not invent article numbers.
+    5. Keep the professional tone and structure appropriate for the {industry} industry.
+    6. Follow the detail level specification ({detail_level}).
+    7. Return the FULL revised topic content (baseline with the confirmed changes applied), not a diff or a summary.
+
+    REVISED CONTENT:
+
 generate_with_references:
   template: |
     You are creating a policy topic with reference to similar existing policies.

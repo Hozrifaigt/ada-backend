@@ -1,4 +1,5 @@
 import json
+import uuid
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
@@ -430,6 +431,151 @@ class DraftStorageService:
             logger.error(f"Failed to get drafts for user {user_id}: {e}")
             return []
     
+    # ============================================================
+    # Version snapshots + audit trail (separate partitions, same table)
+    # ============================================================
+
+    def _chunk_json_into_entity(self, entity: Dict[str, Any], json_str: str, max_size: int = 60 * 1024) -> Dict[str, Any]:
+        """Store a JSON string into an entity, chunking like _serialize_draft does."""
+        if len(json_str) <= (max_size // 2):
+            entity['draft_data'] = json_str
+            entity['draft_chunks'] = 1
+        else:
+            chunk_size = max_size // 2
+            chunks = [json_str[i:i + chunk_size] for i in range(0, len(json_str), chunk_size)]
+            entity['draft_chunks'] = len(chunks)
+            for i, c in enumerate(chunks):
+                entity[f'draft_data_{i}'] = c
+        return entity
+
+    def _read_chunked_json(self, entity: Dict[str, Any]) -> str:
+        """Reassemble a chunked JSON string stored by _chunk_json_into_entity."""
+        chunk_count = entity.get('draft_chunks', 1)
+        if chunk_count == 1:
+            return entity.get('draft_data', '')
+        return ''.join(entity.get(f'draft_data_{i}', '') for i in range(chunk_count))
+
+    def create_version(self, draft_id: str, draft, label: str = "", created_by: str = "", reason: str = "") -> Optional[str]:
+        """Snapshot the full draft as an immutable version. Returns the version id."""
+        try:
+            now = datetime.now(timezone.utc)
+            version_id = now.strftime('%Y%m%dT%H%M%S%f') + 'Z'
+            draft_dict = draft.model_dump(mode='json') if hasattr(draft, 'model_dump') else draft
+            draft_json = json.dumps(draft_dict, ensure_ascii=False)
+            entity = {
+                'PartitionKey': f'version_{draft_id}',
+                'RowKey': version_id,
+                'draft_id': draft_id,
+                'version_id': version_id,
+                'created_at': now.isoformat(),
+                'created_by': created_by or '',
+                'label': label or '',
+                'reason': reason or '',
+                'size': len(draft_json),
+            }
+            self._chunk_json_into_entity(entity, draft_json)
+            self.table_client.create_entity(entity=entity)
+            logger.info(f"Created version {version_id} for draft {draft_id} (label='{label}')")
+            return version_id
+        except Exception as e:
+            logger.error(f"Failed to create version for draft {draft_id}: {e}")
+            return None
+
+    def list_versions(self, draft_id: str) -> List[Dict[str, Any]]:
+        """List version metadata (no content), newest first."""
+        try:
+            entities = self.table_client.query_entities(
+                query_filter=f"PartitionKey eq 'version_{draft_id}'",
+                select=['RowKey', 'version_id', 'created_at', 'created_by', 'label', 'reason', 'size']
+            )
+            out = [{
+                'version_id': e.get('version_id') or e['RowKey'],
+                'created_at': e.get('created_at', ''),
+                'created_by': e.get('created_by', ''),
+                'label': e.get('label', ''),
+                'reason': e.get('reason', ''),
+                'size': e.get('size', 0),
+            } for e in entities]
+            out.sort(key=lambda x: x['created_at'], reverse=True)
+            return out
+        except Exception as e:
+            logger.error(f"Failed to list versions for draft {draft_id}: {e}")
+            return []
+
+    def get_version(self, draft_id: str, version_id: str) -> Optional[CompleteDraft]:
+        """Load a snapshot as a CompleteDraft."""
+        try:
+            entity = self.table_client.get_entity(partition_key=f'version_{draft_id}', row_key=version_id)
+            draft_json = self._read_chunked_json(entity)
+            return CompleteDraft(**json.loads(draft_json))
+        except ResourceNotFoundError:
+            logger.warning(f"Version {version_id} not found for draft {draft_id}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get version {version_id} for draft {draft_id}: {e}")
+            return None
+
+    def restore_version(self, draft_id: str, version_id: str, restored_by: str = "") -> Optional[CompleteDraft]:
+        """Snapshot the current draft, then overwrite it with the chosen version."""
+        snapshot = self.get_version(draft_id, version_id)
+        if not snapshot:
+            return None
+        current = self.get_draft(draft_id)
+        if current:
+            self.create_version(draft_id, current, label='auto: before restore', created_by=restored_by)
+        snapshot.id = draft_id
+        snapshot.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        if self.update_draft(draft_id, snapshot):
+            return snapshot
+        return None
+
+    def get_original_version(self, draft_id: str) -> Optional[CompleteDraft]:
+        """Load the 'original' snapshot taken at draft creation (for % preserved)."""
+        for v in self.list_versions(draft_id):
+            if (v.get('label') or '') == 'original':
+                return self.get_version(draft_id, v['version_id'])
+        return None
+
+    def append_audit(self, draft_id: str, actor: str, action: str,
+                     target_id: str = "", target_title: str = "", summary: str = "") -> bool:
+        """Append an immutable audit entry. Failures are non-fatal (logged)."""
+        try:
+            now = datetime.now(timezone.utc)
+            row = now.strftime('%Y%m%dT%H%M%S%f') + 'Z_' + uuid.uuid4().hex[:8]
+            entity = {
+                'PartitionKey': f'audit_{draft_id}',
+                'RowKey': row,
+                'ts': now.isoformat(),
+                'actor': actor or '',
+                'action': action,
+                'target_id': target_id or '',
+                'target_title': target_title or '',
+                'summary': summary or '',
+            }
+            self.table_client.create_entity(entity=entity)
+            return True
+        except Exception as e:
+            logger.warning(f"Audit append failed for draft {draft_id} (non-fatal): {e}")
+            return False
+
+    def list_audit(self, draft_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        """List audit entries, newest first."""
+        try:
+            entities = self.table_client.query_entities(query_filter=f"PartitionKey eq 'audit_{draft_id}'")
+            out = [{
+                'ts': e.get('ts', ''),
+                'actor': e.get('actor', ''),
+                'action': e.get('action', ''),
+                'target_id': e.get('target_id', ''),
+                'target_title': e.get('target_title', ''),
+                'summary': e.get('summary', ''),
+            } for e in entities]
+            out.sort(key=lambda x: x['ts'], reverse=True)
+            return out[:limit]
+        except Exception as e:
+            logger.error(f"Failed to list audit for draft {draft_id}: {e}")
+            return []
+
     def cleanup_old_drafts(self, days_old: int = 30) -> int:
         """
         Clean up drafts older than specified days.

@@ -494,6 +494,33 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
             logger.warning(f"Failed to get policy {policy_id}: {e}")
             return None
     
+    def list_library_policies(self, function: Optional[str] = None, max_results: int = 200) -> List[Dict]:
+        """Lightweight listing of library policies for the benchmark picker."""
+        try:
+            filter_expr = "record_type eq 'policy'"
+            if function:
+                safe_function = function.strip().lower().replace("'", "''")
+                filter_expr += f" and function eq '{safe_function}'"
+            results = self.search_client.search(
+                search_text="*",
+                filter=filter_expr,
+                select="id,filename,description,function,web_url",
+                top=max_results
+            )
+            policies = []
+            for r in results:
+                policies.append({
+                    "policy_id": r.get("id"),
+                    "filename": r.get("filename", ""),
+                    "description": r.get("description", ""),
+                    "function": r.get("function", ""),
+                    "web_url": r.get("web_url", ""),
+                })
+            return policies
+        except Exception as e:
+            logger.error(f"Failed to list library policies: {e}")
+            return []
+
     def get_all_policies(self, max_results: int = 50) -> List[Dict]:
         """
         Get all policy documents (no vector search, just listing).

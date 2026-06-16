@@ -30,7 +30,16 @@ from app.models.draft_models import (
     TopicContext,
     ContentGenerationResponse,
     CritiqueResponse,
-    SimilarPolicy
+    SimilarPolicy,
+    GapReportResponse,
+    ApplyGapRequest,
+    ApplyGapResponse,
+    AssessBatchRequest,
+    GapSummary,
+    ConsistencyReport,
+    DraftVersion,
+    AuditEntry,
+    SaveVersionRequest,
 )
 from app.models.toc_chat_models import (
     TOCChatMessage,
@@ -179,6 +188,9 @@ async def initialize_draft_from_upload_endpoint(
     policy_file: UploadFile = File(...),
     previous_policy_file: Optional[UploadFile] = File(None),
     regulations_files: Optional[List[UploadFile]] = File(None),
+    benchmark_file: Optional[UploadFile] = File(None),
+    benchmark_policy_id: Optional[str] = Form(None),
+    review_intensity: str = Form("preserve"),
     draft_service: DraftService = Depends(get_draft_service),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -215,6 +227,8 @@ async def initialize_draft_from_upload_endpoint(
             for rf in regulations_files:
                 regulations_bytes_list.append((rf.filename, await rf.read()))
 
+        benchmark_bytes = await benchmark_file.read() if benchmark_file else None
+
         result = await draft_service.initialize_draft_from_upload(
             file_bytes=file_bytes,
             filename=policy_file.filename,
@@ -228,10 +242,18 @@ async def initialize_draft_from_upload_endpoint(
             detail_level=detail_level,
             previous_policy_bytes=previous_policy_bytes,
             previous_policy_filename=previous_policy_file.filename if previous_policy_file else None,
-            regulations_files=regulations_bytes_list
+            regulations_files=regulations_bytes_list,
+            benchmark_file_bytes=benchmark_bytes,
+            benchmark_filename=benchmark_file.filename if benchmark_file else None,
+            selected_benchmark_policy_id=benchmark_policy_id,
+            vector_store=get_store(),
+            llm_service=get_llm(),
+            review_intensity=review_intensity,
         )
 
         if result:
+            draft_service.log_audit(result["draft_id"], current_user.get('email', ''), "created",
+                                    summary=f"Review draft from upload: {policy_file.filename}")
             return InitializeDraftResponse(
                 draft_id=result["draft_id"],
                 similar_policies_found=0,
@@ -281,6 +303,203 @@ async def apply_policy_to_draft(
             detail="Failed to apply policy TOC to draft"
         )
     return {"message": "TOC applied successfully", "draft_id": draft_id}
+
+
+@router.post("/{draft_id}/topics/{topic_id}/gap-report", response_model=GapReportResponse)
+async def generate_topic_gap_report(
+    draft_id: str,
+    topic_id: str,
+    subtopic_id: Optional[str] = None,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Generate a gap report for one topic/subtopic, comparing the client's content to the benchmark + regulations."""
+    logger.info(f"Gap report requested for draft {draft_id} topic {topic_id} subtopic {subtopic_id} by {current_user.get('email')}")
+    report = await draft_service.generate_gap_report_for_topic(
+        draft_id=draft_id,
+        topic_id=topic_id,
+        vector_store=get_store(),
+        llm_service=get_llm(),
+        subtopic_id=subtopic_id,
+    )
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate gap report"
+        )
+    return GapReportResponse(gap_report=report, message="Gap report generated")
+
+
+@router.post("/{draft_id}/topics/{topic_id}/apply-gap", response_model=ApplyGapResponse)
+async def apply_topic_gap(
+    draft_id: str,
+    topic_id: str,
+    request: ApplyGapRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Apply the reviewer-confirmed gap findings to a topic, preserving the baseline."""
+    logger.info(f"Apply-gap requested for draft {draft_id} topic {topic_id} by {current_user.get('email')}")
+    result = await draft_service.apply_gap_for_topic(
+        draft_id=draft_id,
+        topic_id=topic_id,
+        request=request,
+        vector_store=get_store(),
+        llm_service=get_llm()
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to apply gap changes"
+        )
+    if not request.preview:  # previews don't persist, so don't audit them
+        target = request.subtopic_id or topic_id
+        draft_service.log_audit(draft_id, current_user.get('email', ''), "gap_applied",
+                                target_id=target, summary=f"{result.get('word_count', 0)} words")
+    return ApplyGapResponse(**result)
+
+
+@router.post("/{draft_id}/assess-batch")
+async def assess_units_batch(
+    draft_id: str,
+    request: AssessBatchRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Assess several topics/subtopics in one request — loads once, runs the LLM reports in
+    parallel (asyncio.gather), and writes once."""
+    logger.info(f"Assess-batch ({len(request.units)} units) for draft {draft_id} by {current_user.get('email')}")
+    results = await draft_service.assess_batch(
+        draft_id=draft_id,
+        units=[u.model_dump() for u in request.units],
+        vector_store=get_store(),
+        llm_service=get_llm(),
+    )
+    if results is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    return {"results": results}
+
+
+@router.post("/{draft_id}/consistency-check", response_model=ConsistencyReport)
+async def run_consistency_check(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Run a whole-policy consistency pass (contradictions, terminology, duplicates, etc.)."""
+    report = await draft_service.check_consistency(draft_id, llm_service=get_llm())
+    if report is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "consistency_check",
+                            summary=f"{len(report['issues'])} issues")
+    return ConsistencyReport(**report)
+
+
+@router.get("/{draft_id}/gap-summary", response_model=GapSummary)
+async def get_gap_summary(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Aggregate the persisted gap data into a client-facing summary (rollup + narrative)."""
+    summary = await draft_service.build_gap_summary(draft_id, llm_service=get_llm())
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    return GapSummary(**summary)
+
+
+@router.post("/{draft_id}/export/gap-summary/word")
+async def export_gap_summary_word(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Export the gap-assessment summary as a Word document."""
+    summary = await draft_service.build_gap_summary(draft_id, llm_service=get_llm())
+    draft = draft_service.get_draft(draft_id)
+    if summary is None or draft is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    from app.services.word_export_service import WordExportService
+    stream = WordExportService().export_gap_summary(summary, draft["metadata"])
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "exported", summary="Gap summary (Word)")
+    safe = "".join(c for c in draft["metadata"]["title"] if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')[:50]
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename={safe}_gap_summary.docx"}
+    )
+
+
+@router.post("/{draft_id}/versions")
+async def save_draft_version(
+    draft_id: str,
+    request: SaveVersionRequest = SaveVersionRequest(),
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Snapshot the current draft as a restorable version."""
+    actor = current_user.get('email', '')
+    version_id = draft_service.save_version(
+        draft_id, label=request.label or "manual", created_by=actor, reason=request.reason or ""
+    )
+    if not version_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    draft_service.log_audit(draft_id, actor, "version_saved", target_id=version_id,
+                            summary=request.label or "manual")
+    return {"version_id": version_id, "message": "Version saved"}
+
+
+@router.get("/{draft_id}/versions", response_model=List[DraftVersion])
+async def list_draft_versions(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """List saved versions (metadata only), newest first."""
+    return [DraftVersion(**v) for v in draft_service.list_versions(draft_id)]
+
+
+@router.post("/{draft_id}/versions/{version_id}/restore")
+async def restore_draft_version(
+    draft_id: str,
+    version_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Restore a version (auto-snapshots the current draft first)."""
+    actor = current_user.get('email', '')
+    result = draft_service.restore_version(draft_id, version_id, restored_by=actor)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version or draft not found")
+    draft_service.log_audit(draft_id, actor, "version_restored", target_id=version_id)
+    return {"message": "Version restored", "draft": result}
+
+
+@router.get("/{draft_id}/audit", response_model=List[AuditEntry])
+async def get_draft_audit(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Return the draft's audit trail, newest first."""
+    return [AuditEntry(**a) for a in draft_service.list_audit(draft_id)]
+
+
+@router.get("/library-policies")
+async def list_library_policies(
+    function: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """List library policies for the benchmark picker, optionally filtered by function."""
+    try:
+        store = get_store()
+        return {"policies": store.list_library_policies(function=function)}
+    except Exception as e:
+        logger.error(f"Failed to list library policies: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list library policies"
+        )
 
 
 @router.get("/", response_model=DraftListResponse)
@@ -671,7 +890,8 @@ async def export_draft_to_word(
         export_service = WordExportService()
         word_doc = export_service.export_draft_to_word(draft)
         filename = export_service.get_filename(draft)
-        
+        draft_service.log_audit(draft_id, current_user.get('email', ''), "exported", summary="Word")
+
         # Delete draft after export if requested
         if request.delete_after_export:
             draft_service.delete_draft(draft_id)
@@ -724,6 +944,7 @@ async def export_draft_to_pdf(
         export_service = PDFExportService()
         pdf_doc = export_service.export_draft_to_pdf(draft)
         filename = export_service.get_filename(draft)
+        draft_service.log_audit(draft_id, current_user.get('email', ''), "exported", summary="PDF")
 
         # Delete draft after export if requested
         if request.delete_after_export:
