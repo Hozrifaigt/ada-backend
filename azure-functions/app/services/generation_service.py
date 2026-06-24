@@ -524,6 +524,39 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
                 return json.loads(text[start:end + 1])
             raise
 
+    async def infer_heading_levels(self, document_start: str, headings: List[Dict[str, Any]], llm_service):
+        """LLM re-leveling for low-confidence docs. Given the doc's first words (its TOC, if any) and
+        the detected heading list, return (updates {index: level}, drops {index}). Content is never
+        sent and never returned — only the nesting decisions."""
+        rendered = "\n".join(
+            f"{h['index']}: [{h.get('hint', '')}] {h['title']}  (current_level {h['level']})"
+            for h in headings
+        )
+        prompt = self.prompt_manager.get_prompt(
+            "infer_heading_levels",
+            document_start=document_start or "(none)",
+            headings=rendered or "(none)",
+        )
+        response = await llm_service.generate(prompt)
+        data = self._parse_json_object(response)
+
+        # The TOC is the source of truth → apply the LLM's levels/drops directly. (The only safety
+        # net is upstream: a result that produces zero topics is not adopted.)
+        updates: Dict[int, int] = {}
+        drops = set()
+        for item in data.get("levels", []):
+            try:
+                idx = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if item.get("is_heading") is False:
+                drops.add(idx)
+                continue
+            lvl = item.get("level")
+            if isinstance(lvl, int) and lvl >= 1:
+                updates[idx] = lvl
+        return updates, drops
+
     def _format_findings_for_prompt(self, findings: List[Dict[str, Any]]) -> str:
         """Format confirmed gap findings as an instruction list for the apply prompt."""
         if not findings:

@@ -323,11 +323,34 @@ class DraftService:
             except Exception as e:
                 logger.warning(f"Failed to upload files to blob storage (non-fatal): {e}")
 
-            # Parse the main (client) policy document → TOC baseline
+            # Parse the main (client) policy document → TOC baseline. keep_empty_sections=True so the
+            # client's empty sections are preserved as gaps to review (not pruned away).
             processor = DocumentProcessor()
-            processed = processor.process(BytesIO(file_bytes))
+            processed = processor.process(BytesIO(file_bytes), keep_empty_sections=True)
             topics = processed.get("topics", [])
-            logger.info(f"Parsed client document: {len(topics)} topics extracted")
+            logger.info(f"Parsed client document: {len(topics)} topics "
+                        f"(confidence: {(processed.get('metadata') or {}).get('confidence')})")
+
+            # Low-confidence extraction → LLM leveling pass: send the doc's first 300 words (the TOC,
+            # if any) + the detected headings; the LLM fixes the nesting. Content stays verbatim
+            # (reused from deterministic slicing). Deterministic result is kept on any failure.
+            conf = (processed.get("metadata") or {}).get("confidence")
+            needs_manual_toc = (conf == "empty")  # nothing to level — consultant builds the TOC
+            if llm_service and conf not in ("high", "empty", None):
+                try:
+                    updates, drops = await self.generation_service.infer_heading_levels(
+                        processor.toc_context_for_llm(300), processor.get_heading_hints(), llm_service
+                    )
+                    if updates or drops:
+                        rebuilt = processor.rebuild_with_levels(updates, drops)
+                        if rebuilt.get("topics"):  # guard: don't let a degenerate result wipe the TOC
+                            processed = rebuilt
+                            topics = rebuilt.get("topics", [])
+                            logger.info(f"LLM leveling applied (was {conf}): {len(topics)} topics")
+                        else:
+                            logger.warning("LLM leveling produced no topics; keeping deterministic")
+                except Exception as e:
+                    logger.warning(f"LLM leveling failed (non-fatal, using deterministic): {e}")
 
             # Extract text from uploaded regulations files (.docx only)
             uploaded_regulations_text = None
@@ -419,6 +442,7 @@ class DraftService:
                 benchmark_source=benchmark_source,
                 benchmark_topics_json=benchmark_topics_json,
                 review_intensity=(review_intensity or "preserve"),
+                needs_manual_toc=needs_manual_toc,
             )
 
             # Reconcile the client TOC against the benchmark: the LLM decides the final TOC

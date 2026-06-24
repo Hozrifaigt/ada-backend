@@ -1,3 +1,39 @@
+infer_heading_levels:
+  template: |
+    You assign the correct OUTLINE NESTING LEVEL to each section heading detected in a policy
+    document, using the document's Table of Contents as the source of truth.
+
+    You are given:
+    1) The first part of the document, with each line shown at its real indentation. If it contains a
+       Table of Contents, that TOC's INDENTATION shows the intended nesting depth: a line at the left
+       margin is level 1, indented once beneath it is level 2, indented twice is level 3, and so on.
+    2) The headings detected in the document body, in order. Each line is:
+         index: [detected_by] title  (current_level N)
+
+    For EACH detected heading, output its level (1 = top-level, 2 = subsection, 3 = sub-subsection,
+    ...) and whether it is genuinely a heading:
+    - If the document start contains a Table of Contents, find the heading in it and use that entry's
+      indentation depth as the heading's level.
+    - If a heading is NOT in the Table of Contents (or there is no TOC), infer its level from the
+      nearby headings; keep its current_level if unsure.
+    - Set "is_heading": false only for an entry that is clearly NOT a section heading (a stray
+      bold/uppercase line, a defined term, a table/figure label).
+    - Do NOT invent headings and do NOT change the titles.
+
+    DOCUMENT START (if a Table of Contents appears here, its indentation = nesting depth):
+    {document_start}
+
+    DETECTED HEADINGS (index: [detected_by] title  (current_level N)):
+    {headings}
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "levels": [
+        {{"index": 0, "level": 1, "is_heading": true}},
+        {{"index": 1, "level": 2, "is_heading": true}}
+      ]
+    }}
+
 summarize_document:
   name: "Summarize Policy Document for Semantic Search"
   version: 1.0

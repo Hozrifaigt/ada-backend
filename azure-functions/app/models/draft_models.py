@@ -371,6 +371,7 @@ class DraftMetadata(BaseModel):
     benchmark_topics_json: Optional[str] = Field(None, description="Serialized parsed topics when the benchmark is an uploaded file")
     review_intensity: str = Field(default="preserve", description="How much the review may change the policy: preserve (keep >=50-60% baseline) | rebuild (heavy rewrite for weak policies)")
     toc_reconciliation_note: Optional[str] = Field(None, description="LLM hint from TOC reconciliation (e.g. 'policy looks light, consider Rebuild')")
+    needs_manual_toc: bool = Field(default=False, description="True when no structure could be extracted from the upload — the consultant should build/fix the TOC manually")
     consistency_report_json: Optional[str] = Field(None, description="Serialized last whole-policy ConsistencyReport")
 
     @property
