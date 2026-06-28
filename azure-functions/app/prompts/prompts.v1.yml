@@ -284,6 +284,64 @@ gap_summary_narrative:
 
     Return ONLY the narrative prose (no headings, no JSON).
 
+consolidate_theme:
+  template: |
+    You are a senior policy consultant CONSOLIDATING a single section of a client policy.
+    The client's content for this theme is currently scattered across the policy. Your job is to gather
+    everything in the WHOLE policy that belongs to this section's theme, bring it together here, align it
+    to the good-standard benchmark, and return one clean consolidated draft for THIS section only.
+
+    SECTION (theme) BEING CONSOLIDATED: {topic_title}
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Industry: {industry}
+    Detail Level: {detail_level}
+
+    THIS SECTION'S CURRENT CONTENT (the baseline to preserve where adequate):
+    {existing_content}
+
+    THE WHOLE CLIENT POLICY (scan ALL sections; pull anything about "{topic_title}" into this section):
+    {whole_policy_text}
+
+    GOOD-STANDARD BENCHMARK CONTENT FOR THIS THEME (reference only; do not copy verbatim):
+    {benchmark_content}
+
+    APPLICABLE REGULATION SECTIONS (may be empty):
+    {regulations_context}
+
+    INSTRUCTIONS:
+    1. Pull every relevant point about this theme from anywhere in the policy into one coherent section.
+    2. Preserve the client's own wording where it is adequate; do not rewrite compliant content.
+    3. Do NOT invent content — only consolidate what exists in the policy, plus clearly-needed benchmark/
+       regulation points.
+    4. Return the FULL consolidated section content as prose (no headings, no JSON, no commentary).
+
+    CONSOLIDATED CONTENT:
+
+toc_from_text:
+  template: |
+    You are parsing a Table of Contents that a consultant pasted or described in free text, into a clean
+    structured TOC for a policy review. Use the pasted text as the intended structure.
+
+    PASTED TOC / INSTRUCTIONS:
+    {pasted_text}
+
+    CURRENT WORKING TOC (for reference; the consultant may want to adapt toward the pasted one):
+    {current_toc}
+
+    INSTRUCTIONS:
+    1. Produce the ordered list of top-level topics described by the pasted text.
+    2. Each topic may have subtopics (sub-sections). Keep titles concise and faithful to the pasted text.
+    3. Do not invent sections the pasted text does not imply.
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "toc": [
+        {{"title": "Topic title", "subtopics": ["Subtopic title", "..."]}}
+      ]
+    }}
+
 reconcile_toc:
   template: |
     You are a senior policy consultant deciding the final Table of Contents for a CLIENT POLICY REVIEW.
@@ -314,13 +372,17 @@ reconcile_toc:
 
     INSTRUCTIONS:
     1. Produce the final ordered list of topics for this policy review, honoring the REVIEW INTENSITY above.
-    2. For each final topic record where it came from and how it maps to the benchmark:
-       - "title": the final topic title
+    2. CRITICAL — do NOT invent sections. Every final topic MUST come from the CLIENT POLICY TOPICS or the
+       GOOD-STANDARD BENCHMARK TOPICS listed above. Reuse the EXACT title from one of those lists (you may
+       lightly rename a CLIENT topic for clarity, but a "benchmark"/"both" topic's title must match a real
+       benchmark topic). Never output a title that appears in neither list.
+    3. For each final topic record where it came from and how it maps to the benchmark:
+       - "title": the final topic title (verbatim from the client or benchmark list, per rule 2)
        - "source": "client" (from the client policy), "benchmark" (added because the client lacked it), or "both" (a client topic that also maps to a benchmark section)
        - "client_match": the exact client topic title it is based on, or null
        - "benchmark_match": the exact benchmark topic title it maps to, or null
        - "note": a SHORT rationale only when you merged, renamed, or added something (else "")
-    3. Also judge the overall client policy: is it weak/light enough that a heavier rebuild would help?
+    4. Also judge the overall client policy: is it weak/light enough that a heavier rebuild would help?
 
     OUTPUT FORMAT - return ONLY valid JSON, no other text:
     {{
@@ -365,9 +427,10 @@ gap_assessment:
     PREVIOUS CLIENT POLICY EXCERPT (for continuity; may be empty):
     {previous_policy_excerpt}
 
-    ALREADY COVERED ELSEWHERE IN THIS TOPIC (read-only context; may say "None"):
-    The following parent-topic intro and sibling subsections are part of the same topic. They are NOT
-    being assessed here — treat them only as context so you don't duplicate or contradict them:
+    ALREADY COVERED ELSEWHERE IN THE POLICY (read-only context; may say "None"):
+    The blocks below are the parent-topic intro, sibling subsections, AND a map of the OTHER sections of
+    the SAME client policy (titles + brief snippets). They are NOT being assessed here. Treat them only as
+    context: if a point is already covered in ANY of them, it is NOT a gap — do not flag it as missing.
     {surrounding_context}
 
     INSTRUCTIONS:
@@ -379,15 +442,22 @@ gap_assessment:
        - "severity": one of "high", "medium", "low" (regulation non-compliance is usually high)
        - "description": what the gap is, in one or two sentences
        - "suggested_change": the concrete change to apply to the client's content
+       - "evidence": a SHORT verbatim quote from the benchmark or regulation text above that proves this
+         gap is real. REQUIRED for "missing" and "non_compliant" findings. If you cannot quote supporting
+         text from the benchmark/regulation provided, DO NOT output the finding (do not invent gaps).
+       - "evidence_source": where the quote came from (e.g. benchmark section name, or regulation article number)
     4. If the existing content is already strong and compliant, return an empty findings list.
     5. Do NOT suggest rewriting compliant, adequate content.
-    6. Do NOT flag something as missing or suggest adding it if it is already covered in the
-       "ALREADY COVERED ELSEWHERE IN THIS TOPIC" context — assess ONLY the target content above.
+    6. Do NOT flag something as missing or suggest adding it if it is already covered ANYWHERE in the
+       "ALREADY COVERED ELSEWHERE IN THE POLICY" context above — assess ONLY the target content, but never
+       re-flag a point that another section already handles.
+    7. Stay within this topic's scope: only report gaps that genuinely belong to "{topic_title}". Do not
+       map a benchmark point about a different process onto this topic.
 
     OUTPUT FORMAT - return ONLY valid JSON, no other text:
     {{
       "findings": [
-        {{"type": "missing", "source": "benchmark", "severity": "medium", "description": "...", "suggested_change": "..."}}
+        {{"type": "missing", "source": "benchmark", "severity": "medium", "description": "...", "suggested_change": "...", "evidence": "verbatim quote from benchmark/regulation", "evidence_source": "benchmark section / regulation article"}}
       ],
       "overall_summary": "One or two sentences summarizing the gaps for this topic."
     }}

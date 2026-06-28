@@ -615,12 +615,21 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         findings: List[GapFinding] = []
         for f in data.get("findings", []):
             try:
+                ftype = str(f.get("type", "enhancement"))
+                evidence = (str(f.get("evidence", "")).strip() or None)
+                # Evidence gate (Stage 3d): missing/non_compliant findings must be backed by a quote
+                # from the benchmark/regulation. Drop "made up" gaps with no evidence.
+                if ftype in ("missing", "non_compliant") and not evidence:
+                    logger.info(f"Dropping unevidenced {ftype} finding for '{topic_title}'")
+                    continue
                 findings.append(GapFinding(
-                    type=str(f.get("type", "enhancement")),
+                    type=ftype,
                     source=str(f.get("source", "benchmark")),
                     severity=str(f.get("severity", "medium")),
                     description=str(f.get("description", "")).strip(),
                     suggested_change=str(f.get("suggested_change", "")).strip(),
+                    evidence=evidence,
+                    evidence_source=(str(f.get("evidence_source", "")).strip() or None),
                 ))
             except Exception as e:
                 logger.warning(f"Skipping malformed gap finding: {e}")
@@ -771,6 +780,46 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             logger.error(f"LLM response: {response[:500]}")
             raise
         return data
+
+    async def generate_toc_from_text(self, pasted_text: str, current_toc_text: str, llm_service) -> List[Dict[str, Any]]:
+        """Parse a pasted/described TOC into a structured [{title, subtopics:[...]}] list (Stage 1c)."""
+        prompt = self.prompt_manager.get_prompt(
+            "toc_from_text",
+            pasted_text=pasted_text or "",
+            current_toc=current_toc_text or "(none)",
+        )
+        response = await llm_service.generate(prompt)
+        try:
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse toc_from_text JSON: {e}")
+            return []
+        return data.get("toc", []) or []
+
+    async def consolidate_theme_content(
+        self, topic_title: str, existing_content: str, whole_policy_text: str,
+        benchmark_content: Optional[str], draft, llm_service,
+        regulation_chunks: List[RegulationChunk] = None,
+    ) -> str:
+        """Consolidate everything about a theme from across the whole policy into one section (Stage 2)."""
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
+        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
+        if uploaded_regs:
+            sep = "\n\n" if regulations_context else ""
+            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
+        prompt = self.prompt_manager.get_prompt(
+            "consolidate_theme",
+            topic_title=topic_title,
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            detail_level=self._map_detail_level(draft.metadata.detail_level),
+            existing_content=existing_content or "(none yet)",
+            whole_policy_text=whole_policy_text or "(none)",
+            benchmark_content=benchmark_content or "None available",
+            regulations_context=regulations_context or "None available",
+        )
+        response = await llm_service.generate(prompt)
+        return response.strip()
 
 
     async def _generate_with_references(

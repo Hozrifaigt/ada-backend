@@ -420,6 +420,12 @@ class DraftService:
 
             # Build the client TOC baseline
             toc = self._transform_uploaded_doc_toc(topics)
+            # Snapshot the client's own TOC BEFORE reconciliation mutates it (renames/mapping),
+            # so the TOC tab can show the read-only "Current" column (titles only — see _slim_toc_json).
+            client_toc_json = self._slim_toc_json(toc)
+            # Titles-only benchmark TOC for the "Extracted" column — set for ANY benchmark source
+            # (uploaded, library, or auto-matched), unlike benchmark_topics_json which is uploaded-only.
+            benchmark_toc_json = self._slim_benchmark_toc_json(benchmark_topics_for_toc) if benchmark_topics_for_toc else None
 
             draft_metadata = DraftMetadata(
                 id=draft_id,
@@ -443,6 +449,8 @@ class DraftService:
                 benchmark_topics_json=benchmark_topics_json,
                 review_intensity=(review_intensity or "preserve"),
                 needs_manual_toc=needs_manual_toc,
+                client_toc_json=client_toc_json,
+                benchmark_toc_json=benchmark_toc_json,
             )
 
             # Reconcile the client TOC against the benchmark: the LLM decides the final TOC
@@ -458,6 +466,11 @@ class DraftService:
                     draft_metadata.toc_reconciliation_note = recon_note
                 else:
                     toc = self._naive_benchmark_union(toc, benchmark_topics_for_toc)
+
+            # Record the reconciled recommendation (titles only) as the "Good" recommendation snapshot.
+            # The editable working TOC is `toc` itself; it may diverge from this as the reviewer edits.
+            draft_metadata.good_toc_json = self._slim_toc_json(toc)
+            draft_metadata.good_toc_basis_json = self._toc_basis(draft_metadata)
 
             draft_to_save = CompleteDraft(
                 id=draft_id,
@@ -493,6 +506,43 @@ class DraftService:
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
+
+    @staticmethod
+    def _toc_basis(metadata) -> str:
+        """Snapshot of the Current + Extracted TOCs the Good TOC was last derived from — lets the UI
+        show the 'Regenerate' action only when one of them has since changed."""
+        return json.dumps({
+            "client": getattr(metadata, "client_toc_json", None),
+            "benchmark": getattr(metadata, "benchmark_toc_json", None),
+        })
+
+    @staticmethod
+    def _slim_toc_json(toc) -> str:
+        """Titles-only TOC snapshot for the 3-column display. Storing full content here would
+        duplicate the policy text and overflow Azure Table's 1MB per-entity limit."""
+        return json.dumps([
+            {"topic": t.topic, "subtopics": [{"topic": s.topic} for s in t.subtopics]}
+            for t in toc
+        ])
+
+    @staticmethod
+    def _slim_benchmark_toc_json(topics) -> str:
+        """Titles-only benchmark TOC for the 'Extracted' column. Works for any benchmark source
+        (uploaded DocumentProcessor topics or library topics) and drops content/embeddings so it
+        stays tiny in the Table entity."""
+        out = []
+        for t in topics or []:
+            subs = t.get("subtopics") or []
+            if isinstance(subs, str):
+                try:
+                    subs = json.loads(subs)
+                except Exception:
+                    subs = []
+            out.append({
+                "topic": t.get("topic") or t.get("name") or "",
+                "subtopics": [{"topic": s.get("name") or s.get("topic") or ""} for s in subs],
+            })
+        return json.dumps(out)
 
     def _transform_uploaded_doc_toc(self, topics: List[Dict[str, Any]]) -> List:
         """
@@ -574,6 +624,8 @@ class DraftService:
             return self._naive_benchmark_union(client_toc, benchmark_topics), None
 
         client_by_title = {(t.topic or "").strip().lower(): t for t in client_toc}
+        bench_titles = {(bt.get("topic") or bt.get("name") or "").strip().lower()
+                        for bt in benchmark_topics if (bt.get("topic") or bt.get("name"))}
         final_toc: List = []
         used_client = set()
         for entry in data.get("final_toc", []):
@@ -601,6 +653,14 @@ class DraftService:
                 # skip — the safety loop below re-adds the genuine client topic.
                 continue
             else:
+                # Anti-hallucination: a benchmark/both topic must resolve to a real benchmark
+                # section (by benchmark_match or title) or an existing client section. Otherwise
+                # the LLM invented a section that's in neither document — drop it.
+                bm_key = (benchmark_match or "").strip().lower()
+                title_key = title.lower()
+                if bm_key not in bench_titles and title_key not in bench_titles and title_key not in client_by_title:
+                    logger.warning(f"Dropping reconciled TOC entry '{title}' — not found in client or benchmark TOC")
+                    continue
                 final_toc.append(TOCTopic(
                     topic_id=str(uuid.uuid4()),
                     topic=title,
@@ -1721,14 +1781,19 @@ class DraftService:
                 name = msub.get("name") or msub.get("topic")
                 content = (msub.get("content") or msub.get("topic_content") or "").strip() or None
                 return content, name
-            return (self._benchmark_topic_intro(bt) or None), topic_name
+            # No matching benchmark subsection — fall back to the FULL benchmark topic (intro + all its
+            # subsections), not just the intro, so the assessor sees the relevant benchmark context
+            # rather than an unrelated snippet (Stage 3a layered fallback).
+            return (self._benchmark_topic_text(bt) or None), topic_name
         if getattr(topic, "subtopics", None):
             return (self._benchmark_topic_intro(bt) or None), topic_name
         return (self._benchmark_topic_text(bt) or None), topic_name
 
-    def _surrounding_context_for_unit(self, topic, subtopic) -> str:
+    def _surrounding_context_for_unit(self, topic, subtopic, draft=None) -> str:
         """Read-only context so a unit isn't assessed in isolation: parent intro + sibling subsections
-        (for a subtopic), or the list of subsections (for a topic that has them)."""
+        (for a subtopic), the list of subsections (for a topic), PLUS a whole-policy coverage map of the
+        OTHER sections (titles + brief snippets) so a point already covered elsewhere isn't flagged as a
+        false gap (Stage 3b)."""
         parts = []
         intro = (topic.content or "").strip()
         if subtopic is not None:
@@ -1744,6 +1809,18 @@ class DraftService:
             for s in topic.subtopics:
                 has = "has content" if (s.content or "").strip() else "planned"
                 parts.append(f"[Subsection '{s.topic}'] ({has}) — assessed separately")
+        # Whole-policy coverage map: every OTHER top-level section with a short snippet.
+        if draft is not None:
+            covered = []
+            for t in draft.toc:
+                if t.topic_id == topic.topic_id:
+                    continue
+                snippet = (t.content or "").strip().replace("\n", " ")
+                covered.append(f"[Other section '{t.topic}'] {snippet[:300]}" if snippet
+                               else f"[Other section '{t.topic}'] (no content yet)")
+            if covered:
+                parts.append("OTHER SECTIONS OF THIS POLICY (coverage map — do not re-flag points handled here):\n"
+                             + "\n".join(covered))
         return "\n\n".join(parts).strip()
 
     async def generate_gap_report_for_topic(self, draft_id: str, topic_id: str, vector_store, llm_service, subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -1791,7 +1868,7 @@ class DraftService:
                 llm_service=llm_service,
                 regulation_chunks=regulation_chunks,
                 benchmark_topic_name=benchmark_name,
-                surrounding_context=self._surrounding_context_for_unit(topic, subtopic),
+                surrounding_context=self._surrounding_context_for_unit(topic, subtopic, draft),
             )
 
             unit.gap_report_json = report.model_dump_json()
@@ -1846,7 +1923,7 @@ class DraftService:
                 except Exception as e:
                     logger.warning(f"Regulation search failed in batch (non-fatal): {e}")
                 prepared.append((topic, sub, benchmark_content, benchmark_name, regulation_chunks,
-                                 self._surrounding_context_for_unit(topic, sub)))
+                                 self._surrounding_context_for_unit(topic, sub, draft)))
 
             # Phase 2 — run ONLY the LLM calls concurrently (the expensive, truly-async part).
             async def gen(topic, sub, benchmark_content, benchmark_name, regulation_chunks, surrounding):
@@ -2001,6 +2078,241 @@ class DraftService:
             logger.error(traceback.format_exc())
             return None
 
+    # ===== Perfect-TOC-first stage (v2) =====
+
+    def extract_toc_from_file(self, file_bytes: bytes) -> List[Dict[str, Any]]:
+        """Parse an uploaded .docx and return its TOC structure (titles + subtopic titles) so the
+        reviewer can adopt it as the working/good TOC (Stage 1c). Content is not returned — adopting a
+        TOC preserves the CLIENT's content by title match (see apply_toc_structure)."""
+        from io import BytesIO
+        from app.pipelines.document_processor import DocumentProcessor
+        processed = DocumentProcessor().process(BytesIO(file_bytes), keep_empty_sections=True)
+        out = []
+        for t in processed.get("topics", []) or []:
+            out.append({
+                "title": t.get("topic", ""),
+                "subtopics": [s.get("name", s.get("topic", "")) for s in (t.get("subtopics") or [])],
+            })
+        return out
+
+    def apply_toc_structure(self, draft_id: str, new_toc: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Replace the working/good TOC with a provided structure ([{title, subtopics:[...]}]), preserving
+        the client's existing content by case-insensitive title match (the 'redistribute into the new
+        format' ask). Unmatched new sections start empty/pending. Returns the updated draft dict."""
+        from app.models.draft_models import TOCTopic, TOCSubtopic
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        # Index existing content by normalized title (topic and subtopic level).
+        existing_topics = {(t.topic or "").strip().lower(): t for t in draft.toc}
+        existing_subs = {}
+        for t in draft.toc:
+            for s in t.subtopics:
+                existing_subs[(s.topic or "").strip().lower()] = s
+
+        new_models: List[TOCTopic] = []
+        for i, entry in enumerate(new_toc, 1):
+            title = (entry.get("title") or entry.get("topic") or "").strip()
+            if not title:
+                continue
+            match = existing_topics.get(title.lower())
+            subs_in = entry.get("subtopics") or []
+            sub_models = []
+            for j, su in enumerate(subs_in, 1):
+                s_title = (su if isinstance(su, str) else (su.get("title") or su.get("topic") or "")).strip()
+                if not s_title:
+                    continue
+                smatch = existing_subs.get(s_title.lower())
+                sub_models.append(TOCSubtopic(
+                    subtopic_id=(smatch.subtopic_id if smatch else str(uuid.uuid4())),
+                    topic=s_title, order=j,
+                    content=(smatch.content if smatch else ""),
+                    summary=(smatch.summary if smatch else ""),
+                    conversation_history=(smatch.conversation_history if smatch else []),
+                    gap_status=(smatch.gap_status if smatch else "pending"),
+                    benchmark_match=(smatch.benchmark_match if smatch else None),
+                ))
+            new_models.append(TOCTopic(
+                topic_id=(match.topic_id if match else str(uuid.uuid4())),
+                topic=title, order=i,
+                content=(match.content if match else ""),
+                summary=(match.summary if match else ""),
+                conversation_history=(match.conversation_history if match else []),
+                subtopics=sub_models,
+                gap_status=(match.gap_status if match else "pending"),
+                added_from_benchmark=(match.added_from_benchmark if match else False),
+                benchmark_match=(match.benchmark_match if match else None),
+            ))
+        if not new_models:
+            return None
+        draft.toc = new_models
+        draft.metadata.good_toc_json = self._slim_toc_json(new_models)
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return draft.model_dump()
+
+    def save_toc_snapshot(self, draft_id: str, which: str, toc: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Persist an edited titles-only TOC for one of the three reference columns.
+        'client' → client_toc_json (Current), 'benchmark' → benchmark_toc_json (Extracted).
+        'good' is the working TOC, so it routes to apply_toc_structure (which also redistributes
+        the client's existing content into the new structure)."""
+        if which == "good":
+            return self.apply_toc_structure(draft_id, toc)
+        if which not in ("client", "benchmark"):
+            return None
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        slim = []
+        for e in toc or []:
+            title = (e.get("title") or e.get("topic") or "").strip()
+            if not title:
+                continue
+            subs = []
+            for s in e.get("subtopics") or []:
+                s_title = (s if isinstance(s, str) else (s.get("title") or s.get("topic") or "")).strip()
+                if s_title:
+                    subs.append({"topic": s_title})
+            slim.append({"topic": title, "subtopics": subs})
+        slim_json = json.dumps(slim)
+        if which == "client":
+            draft.metadata.client_toc_json = slim_json
+        else:
+            draft.metadata.benchmark_toc_json = slim_json
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return draft.model_dump()
+
+    def _client_topics_from_snapshot(self, draft) -> List:
+        """Build TOCTopic[] from the (possibly edited) Current TOC snapshot, filling content from the
+        working TOC by title so a regenerate doesn't lose existing content. Falls back to the working
+        TOC itself when no snapshot exists."""
+        from app.models.draft_models import TOCTopic, TOCSubtopic
+        try:
+            entries = json.loads(draft.metadata.client_toc_json) if draft.metadata.client_toc_json else []
+        except Exception:
+            entries = []
+        if not entries:
+            return list(draft.toc)
+        work_topics = {(t.topic or "").strip().lower(): t for t in draft.toc}
+        work_subs = {}
+        for t in draft.toc:
+            for s in t.subtopics:
+                work_subs[(s.topic or "").strip().lower()] = s
+        out = []
+        for i, e in enumerate(entries, 1):
+            title = (e.get("topic") or e.get("title") or "").strip()
+            if not title:
+                continue
+            w = work_topics.get(title.lower())
+            subs = []
+            for j, su in enumerate(e.get("subtopics") or [], 1):
+                st = (su if isinstance(su, str) else (su.get("topic") or su.get("title") or "")).strip()
+                if not st:
+                    continue
+                ws = work_subs.get(st.lower())
+                subs.append(TOCSubtopic(
+                    subtopic_id=(ws.subtopic_id if ws else str(uuid.uuid4())), topic=st, order=j,
+                    content=(ws.content if ws else ""), summary=(ws.summary if ws else ""),
+                    conversation_history=(ws.conversation_history if ws else []),
+                ))
+            out.append(TOCTopic(
+                topic_id=(w.topic_id if w else str(uuid.uuid4())), topic=title, order=i,
+                content=(w.content if w else ""), summary=(w.summary if w else ""),
+                conversation_history=(w.conversation_history if w else []), subtopics=subs,
+                benchmark_match=(w.benchmark_match if w else None),
+            ))
+        return out
+
+    def _benchmark_dicts_from_snapshot(self, draft) -> List[Dict[str, Any]]:
+        """Benchmark topics (name + subtopics) from the (possibly edited) Extracted TOC snapshot,
+        for reconciliation."""
+        try:
+            entries = json.loads(draft.metadata.benchmark_toc_json) if draft.metadata.benchmark_toc_json else []
+        except Exception:
+            entries = []
+        out = []
+        for e in entries:
+            title = (e.get("topic") or e.get("name") or e.get("title") or "").strip()
+            if not title:
+                continue
+            subs = []
+            for s in e.get("subtopics") or []:
+                st = (s if isinstance(s, str) else (s.get("topic") or s.get("name") or s.get("title") or "")).strip()
+                if st:
+                    subs.append({"name": st})
+            out.append({"topic": title, "subtopics": subs})
+        return out
+
+    async def regenerate_good_toc(self, draft_id: str, llm_service) -> Optional[Dict[str, Any]]:
+        """Re-derive a fresh Good/working TOC by reconciling the current Current + Extracted TOCs
+        (used after the reviewer edits those). Preserves existing content by title."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        client_topics = self._client_topics_from_snapshot(draft)
+        benchmark_topics = self._benchmark_dicts_from_snapshot(draft)
+        new_toc, note = await self._build_reconciled_toc(client_topics, benchmark_topics, draft.metadata, llm_service)
+        for idx, t in enumerate(new_toc, 1):
+            t.order = idx
+        draft.toc = new_toc
+        draft.metadata.good_toc_json = self._slim_toc_json(new_toc)
+        draft.metadata.good_toc_basis_json = self._toc_basis(draft.metadata)
+        if note:
+            draft.metadata.toc_reconciliation_note = note
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return draft.model_dump()
+
+    def approve_toc(self, draft_id: str, actor: str = "") -> Optional[Dict[str, Any]]:
+        """Lock the working/good TOC as the agreed structure (the explicit gate before content work).
+        Snapshots a version so the approved TOC is restorable (Stage 1d)."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        draft.metadata.toc_approved = True
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        try:
+            self.storage.create_version(draft_id, draft, label="toc_approved", created_by=actor)
+        except Exception as e:
+            logger.warning(f"Could not snapshot approved-TOC version (non-fatal): {e}")
+        return draft.model_dump()
+
+    async def consolidate_theme_for_topic(self, draft_id: str, topic_id: str, vector_store, llm_service,
+                                          subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Consolidate everything about this section's theme from across the whole policy into one
+        section, aligned to the benchmark (Stage 2 on-demand action). Returns proposed content for
+        preview; persistence happens via the normal content-update path after the reviewer confirms."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic = next((t for t in draft.toc if t.topic_id == topic_id), None)
+        if not topic:
+            return None
+        subtopic = None
+        if subtopic_id:
+            subtopic = next((s for s in topic.subtopics if s.subtopic_id == subtopic_id), None)
+        unit = subtopic or topic
+
+        benchmark_topics = self._get_benchmark_topics(draft, vector_store)
+        benchmark_content, _ = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
+        whole_policy_text = self.generation_service._assemble_full_policy_text(draft)
+        regulation_chunks = []
+        try:
+            regulation_chunks = await self.generation_service._search_relevant_regulations(
+                topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
+            )
+        except Exception as e:
+            logger.warning(f"Regulation search failed for consolidate (non-fatal): {e}")
+
+        content = await self.generation_service.consolidate_theme_content(
+            topic_title=unit.topic, existing_content=unit.content or "",
+            whole_policy_text=whole_policy_text, benchmark_content=benchmark_content,
+            draft=draft, llm_service=llm_service, regulation_chunks=regulation_chunks,
+        )
+        return {"content": content, "word_count": len(content.split()), "message": "Consolidated draft generated"}
+
     # ===== Version history & audit trail =====
 
     def save_version(self, draft_id: str, label: str = "", created_by: str = "", reason: str = "") -> Optional[str]:
@@ -2078,6 +2390,19 @@ class DraftService:
             if k:
                 d[k] = d.get(k, 0) + 1
 
+        # Cross-section de-dup (Stage 3c): the same gap can be reported under multiple sections; show it
+        # ONCE, in the first (most-relevant, top-down) section it appears in.
+        seen_desc: List[str] = []
+
+        def _is_duplicate(desc: str) -> bool:
+            norm = " ".join((desc or "").lower().split())
+            if not norm:
+                return False
+            if any(SequenceMatcher(None, norm, s).ratio() > 0.85 for s in seen_desc):
+                return True
+            seen_desc.append(norm)
+            return False
+
         # Flatten units (topic + subtopics).
         units = []
         for t in draft.toc:
@@ -2108,6 +2433,8 @@ class DraftService:
                     data = json.loads(gj)
                     overall = data.get("overall_summary", "") or ""
                     for f in data.get("findings", []):
+                        if _is_duplicate(f.get("description", "")):
+                            continue  # already shown in an earlier section
                         _bump(by_severity, f.get("severity"))
                         _bump(by_type, f.get("type"))
                         _bump(by_source, f.get("source"))
@@ -2118,6 +2445,8 @@ class DraftService:
                             severity=str(f.get("severity", "medium")),
                             description=str(f.get("description", "")),
                             suggested_change=str(f.get("suggested_change", "")),
+                            evidence=(f.get("evidence") or None),
+                            evidence_source=(f.get("evidence_source") or None),
                         ))
                 except Exception:
                     pass

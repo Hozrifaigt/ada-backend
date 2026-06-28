@@ -10,6 +10,18 @@ class TOCChatMessage(BaseModel):
         default=[],
         description="Previous conversation exchanges for context"
     )
+    current_toc: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="The TOC the chatbot should operate on (the dropdown-selected one). Falls back to the working TOC when omitted."
+    )
+    client_toc: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Reference: the client's Current TOC, passed when editing the Good TOC so the bot can merge both."
+    )
+    benchmark_toc: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Reference: the Extracted/benchmark TOC, passed when editing the Good TOC so the bot can merge both."
+    )
 
 
 class TOCOperation(BaseModel):
@@ -45,6 +57,10 @@ class TOCConfirmRequest(BaseModel):
     """Request to confirm and apply a TOC operation."""
     operation: TOCOperation = Field(..., description="Operation to apply")
     current_toc: List[Dict[str, Any]] = Field(..., description="Current TOC to modify")
+    target: Optional[str] = Field(
+        default=None,
+        description="Which TOC to persist to: good (working, default) | client | benchmark"
+    )
 
 
 class TOCConfirmResponse(BaseModel):

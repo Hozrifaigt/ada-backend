@@ -1008,6 +1008,9 @@ async def chat_modify_toc(
         prompt_manager = PromptManager(settings.PROMPT_MANAGER_PATH)
         toc_service = TOCManipulationService(llm, prompt_manager)
 
+        # The chatbot operates on the dropdown-selected TOC when provided, else the working TOC.
+        active_toc = message.current_toc if message.current_toc is not None else draft.get('toc', [])
+
         # Prepare draft context - draft is a dictionary
         metadata = draft.get('metadata', {})
         client_metadata = metadata.get('client_metadata', {})
@@ -1026,10 +1029,32 @@ async def chat_modify_toc(
             'detail_level': metadata.get('detail_level', 3)
         }
 
+        # When editing the Good TOC, make the bot aware of the Current + Extracted TOCs so it can
+        # propose a better structure based on BOTH (plus the user's query). We surface them through the
+        # description the prompt already consumes.
+        def _titles_block(label: str, toc_list) -> str:
+            lines = []
+            for i, t in enumerate(toc_list or [], 1):
+                title = (t.get('topic') or t.get('title') or t.get('name') or '').strip()
+                if not title:
+                    continue
+                lines.append(f"{i}. {title}")
+                for s in (t.get('subtopics') or []):
+                    st = (s if isinstance(s, str) else (s.get('topic') or s.get('name') or s.get('title') or '')).strip()
+                    if st:
+                        lines.append(f"   - {st}")
+            return f"\n\n{label}:\n" + "\n".join(lines) if lines else ""
+
+        reference_block = _titles_block("CLIENT'S CURRENT TOC (reference)", message.client_toc) \
+            + _titles_block("BENCHMARK / EXTRACTED TOC (reference)", message.benchmark_toc)
+        if reference_block:
+            draft_context['description'] = (draft_context.get('description') or '') + reference_block + \
+                "\n\nUse both reference TOCs above, together with the user's request, to propose the best structure."
+
         # Parse the command
         parsed_operation = await toc_service.parse_toc_command(
             user_command=message.message,
-            current_toc=draft.get('toc', []),
+            current_toc=active_toc,
             conversation_history=message.conversation_history,
             draft_context=draft_context
         )
@@ -1040,7 +1065,7 @@ async def chat_modify_toc(
                 success=False,
                 operation=None,
                 preview_toc=None,
-                current_toc=draft.get('toc', []),
+                current_toc=active_toc,
                 message=parsed_operation.get('error', 'Could not understand the command'),
                 follow_up_question=None
             )
@@ -1052,7 +1077,7 @@ async def chat_modify_toc(
                 success=True,
                 operation=None,
                 preview_toc=None,
-                current_toc=draft.get('toc', []),
+                current_toc=active_toc,
                 message=chat_msg,
                 follow_up_question=parsed_operation.get('follow_up_question')
             )
@@ -1063,7 +1088,7 @@ async def chat_modify_toc(
                 success=True,
                 operation=None,
                 preview_toc=None,
-                current_toc=draft.get('toc', []),
+                current_toc=active_toc,
                 message="I need more information to complete this action.",
                 follow_up_question=parsed_operation.get('follow_up_question')
             )
@@ -1087,7 +1112,7 @@ async def chat_modify_toc(
                 params = parsed_operation.get('parameters', {})
                 suggestions_data = await toc_service.generate_topic_suggestions(
                     user_query=params.get('query', message.message),
-                    current_toc=draft.get('toc', []),
+                    current_toc=active_toc,
                     draft_context=draft_context
                 )
 
@@ -1139,16 +1164,16 @@ async def chat_modify_toc(
                 if ai_suggestions:
                     preview_toc, _ = toc_service.execute_toc_operation(
                         operation={'action': 'suggest_topics', 'parameters': {'suggestions': ai_suggestions}},
-                        current_toc=draft.get('toc', []),
+                        current_toc=active_toc,
                         preserve_content=True
                     )
                 else:
-                    preview_toc = draft.get('toc', [])
+                    preview_toc = active_toc
             else:
                 # Execute normal TOC modification
                 preview_toc, success_message = toc_service.execute_toc_operation(
                     operation=parsed_operation,
-                    current_toc=draft.get('toc', []),
+                    current_toc=active_toc,
                     preserve_content=True
                 )
         except Exception as e:
@@ -1157,7 +1182,7 @@ async def chat_modify_toc(
                 success=False,
                 operation=operation,
                 preview_toc=None,
-                current_toc=draft.get('toc', []),
+                current_toc=active_toc,
                 message=f"Error: {str(e)}",
                 follow_up_question=None
             )
@@ -1177,7 +1202,7 @@ async def chat_modify_toc(
             success=True,
             operation=operation,
             preview_toc=preview_toc,
-            current_toc=draft.get('toc', []),
+            current_toc=active_toc,
             message=success_message,
             follow_up_question=parsed_operation.get('follow_up_question'),
             suggestions=suggestions if suggestions else None
@@ -1243,8 +1268,13 @@ async def confirm_toc_modification(
                 undo_available=False
             )
 
-        # Update the draft with new TOC
-        success = draft_service.update_toc(draft_id, updated_toc)
+        # Persist to the dropdown-selected TOC: client/benchmark write to their reference snapshot,
+        # good (or unset) writes the working TOC.
+        target = (request.target or "good").strip()
+        if target in ("client", "benchmark"):
+            success = draft_service.save_toc_snapshot(draft_id, target, updated_toc) is not None
+        else:
+            success = draft_service.update_toc(draft_id, updated_toc)
 
         if not success:
             logger.error(f"Failed to update TOC for draft {draft_id}")
@@ -1291,6 +1321,133 @@ async def update_toc_chat_history(
             detail="Failed to save TOC chat history"
         )
     return {"success": True}
+
+
+# Perfect-TOC-first stage (v2): extract / adopt / approve the working "good" TOC
+
+@router.post("/{draft_id}/toc/extract-from-file")
+async def extract_toc_from_file_endpoint(
+    draft_id: str,
+    file: UploadFile = File(...),
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Parse an uploaded .docx and return its TOC structure so the reviewer can adopt it as the good TOC."""
+    if not file.filename.endswith(".docx"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only .docx files are supported")
+    try:
+        file_bytes = await file.read()
+        preview = draft_service.extract_toc_from_file(file_bytes)
+    except Exception as e:
+        logger.error(f"Failed to extract TOC from file: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not extract TOC from file")
+    return {"preview_toc": preview, "message": f"Extracted {len(preview)} sections from {file.filename}"}
+
+
+@router.post("/{draft_id}/toc/from-text")
+async def toc_from_text_endpoint(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    llm: AzureLLM = Depends(get_llm),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Parse a pasted/described TOC into a structured preview the reviewer can adopt as the good TOC."""
+    draft = draft_service.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    current_titles = "\n".join(f"{i+1}. {t.get('topic','')}" for i, t in enumerate(draft.get("toc", [])))
+    toc = await draft_service.generation_service.generate_toc_from_text(
+        request.get("text", ""), current_titles, llm
+    )
+    return {"preview_toc": toc, "message": f"Parsed {len(toc)} sections"}
+
+
+@router.post("/{draft_id}/toc/use")
+async def use_toc_endpoint(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Adopt a provided TOC structure as the working good TOC, redistributing the client's existing
+    content into it by title match."""
+    result = draft_service.apply_toc_structure(draft_id, request.get("toc", []))
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not apply the provided TOC")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "toc_adopted",
+                            summary=f"{len(request.get('toc', []))} sections")
+    return {"success": True, "draft": result}
+
+
+@router.post("/{draft_id}/toc/snapshot")
+async def save_toc_snapshot_endpoint(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Persist an edited titles-only TOC for one reference column: which = client | benchmark | good.
+    'good' is the working TOC (content redistributed by title); client/benchmark update the read-only
+    reference snapshots shown in the TOC tab."""
+    which = (request.get("which") or "").strip()
+    if which not in ("client", "benchmark", "good"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="which must be one of: client, benchmark, good")
+    result = draft_service.save_toc_snapshot(draft_id, which, request.get("toc", []))
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not save the TOC")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "toc_snapshot_saved",
+                            summary=f"{which}: {len(request.get('toc', []))} sections")
+    return {"success": True, "draft": result}
+
+
+@router.post("/{draft_id}/toc/regenerate-good")
+async def regenerate_good_toc_endpoint(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Re-derive a fresh Good TOC by reconciling the current Current + Extracted TOCs (after the
+    reviewer edits those). Preserves existing content by section title."""
+    result = await draft_service.regenerate_good_toc(draft_id, llm_service=get_llm())
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "toc_good_regenerated")
+    return {"success": True, "draft": result}
+
+
+@router.post("/{draft_id}/toc/approve")
+async def approve_toc_endpoint(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Lock the good TOC as the agreed structure (the gate before per-section content work)."""
+    result = draft_service.approve_toc(draft_id, actor=current_user.get('email', ''))
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "toc_approved")
+    return {"success": True, "draft": result}
+
+
+@router.post("/{draft_id}/topics/{topic_id}/consolidate")
+async def consolidate_theme_endpoint(
+    draft_id: str,
+    topic_id: str,
+    subtopic_id: Optional[str] = None,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Consolidate everything about this section's theme from across the whole policy into one section
+    (preview; persist via the normal content-update path after the reviewer confirms)."""
+    result = await draft_service.consolidate_theme_for_topic(
+        draft_id=draft_id, topic_id=topic_id,
+        vector_store=get_store(), llm_service=get_llm(), subtopic_id=subtopic_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or topic not found")
+    return result
 
 
 # Template endpoint removed - no longer using Excel templates

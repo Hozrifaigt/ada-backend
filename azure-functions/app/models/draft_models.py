@@ -164,6 +164,13 @@ class GapFinding(BaseModel):
     severity: str = Field(default="medium", description="high | medium | low")
     description: str = Field(..., description="What the gap is")
     suggested_change: str = Field(..., description="The concrete change to apply")
+    # Evidence (Stage 3d): missing/non_compliant findings must quote the benchmark/regulation
+    # text they are based on, so gaps can't be "made up".
+    evidence: Optional[str] = Field(None, description="Verbatim quote from the benchmark/regulation supporting this gap")
+    evidence_source: Optional[str] = Field(None, description="Locator for the evidence (benchmark section / regulation article)")
+    # De-dup (Stage 3c): findings that say the same thing across sections share a canonical_id;
+    # the cross-section pass keeps one per cluster, in its most-relevant section.
+    canonical_id: Optional[str] = Field(None, description="Cluster key assigned by the cross-section de-dup pass")
 
 
 class GapReport(BaseModel):
@@ -373,6 +380,13 @@ class DraftMetadata(BaseModel):
     toc_reconciliation_note: Optional[str] = Field(None, description="LLM hint from TOC reconciliation (e.g. 'policy looks light, consider Rebuild')")
     needs_manual_toc: bool = Field(default=False, description="True when no structure could be extracted from the upload — the consultant should build/fix the TOC manually")
     consistency_report_json: Optional[str] = Field(None, description="Serialized last whole-policy ConsistencyReport")
+    # Perfect-TOC-first stage (v2): the TOC tab shows three distinct TOCs and is an explicit gate
+    # before any per-section content work.
+    benchmark_toc_json: Optional[str] = Field(None, description="Titles-only benchmark TOC for the read-only 'Extracted' column (set for any benchmark source)")
+    client_toc_json: Optional[str] = Field(None, description="Snapshot of the client's parsed TOC (read-only 'Current' column)")
+    good_toc_json: Optional[str] = Field(None, description="The reconciled recommendation (read-only 'Good' column); the editable working TOC is `toc`")
+    good_toc_basis_json: Optional[str] = Field(None, description="Snapshot of the Current + Extracted TOCs the Good TOC was last derived from; the 'Regenerate' action shows only when one has since changed")
+    toc_approved: bool = Field(default=False, description="True once the reviewer approves the good/working TOC; unlocks the per-section pipeline")
 
     @property
     def effective_policy_type(self) -> str:
