@@ -2700,19 +2700,21 @@ class DraftService:
             return None
         benchmark_topics = self._get_benchmark_topics(draft, vector_store)
         benchmark_content, benchmark_name = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
-        baseline = unit.baseline_content or unit.content or ""
+        # Assess against the CURRENT content (so a re-run reflects changes already applied), falling back to
+        # the frozen client baseline when the section has no content yet (e.g. an added/benchmark section).
+        current = unit.content or unit.baseline_content or ""
         surrounding = self._surrounding_context_for_unit(topic, subtopic, draft)
 
         # Benchmark-only structured gap report + the as-is rewrite, concurrently.
         report, as_is = await asyncio.gather(
             self.generation_service.generate_gap_report(
                 topic_id=subtopic_id or topic_id, topic_title=unit.topic,
-                existing_content=baseline, benchmark_content=benchmark_content, draft=draft,
+                existing_content=current, benchmark_content=benchmark_content, draft=draft,
                 previous_policy_excerpt="", llm_service=llm_service, regulation_chunks=[],
                 benchmark_topic_name=benchmark_name, surrounding_context=surrounding, benchmark_only=True,
             ),
             self.generation_service.generate_benchmark_as_is(
-                topic_title=unit.topic, baseline_content=baseline, benchmark_content=benchmark_content,
+                topic_title=unit.topic, baseline_content=current, benchmark_content=benchmark_content,
                 draft=draft, llm_service=llm_service,
             ),
         )
@@ -2730,7 +2732,7 @@ class DraftService:
         return {
             "topic_id": topic_id,
             "subtopic_id": subtopic_id,
-            "baseline_content": baseline,
+            "baseline_content": current,
             "benchmark_content": benchmark_content or "",
             "benchmark_match": benchmark_name,
             "findings": [f.model_dump() for f in report.findings],
