@@ -1450,6 +1450,163 @@ async def consolidate_theme_endpoint(
     return result
 
 
+# Content redistribution: map the client's original content into the current Good TOC (by meaning)
+
+@router.post("/{draft_id}/redistribute/propose")
+async def propose_redistribution_endpoint(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Propose a mapping of the client's original content into the current Good TOC sections (by meaning,
+    with an embedding pre-filter + LLM assignment). Read-only — the reviewer confirms via /redistribute/apply."""
+    result = await draft_service.propose_redistribution(
+        draft_id=draft_id, vector_store=get_store(), llm_service=get_llm()
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    return result
+
+
+@router.post("/{draft_id}/redistribute/apply")
+async def apply_redistribution_endpoint(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Commit the reviewer-confirmed redistribution. Body: {sections: [{topic_id, subtopic_id?, content}]}.
+    Sets both content and baseline_content for each section to the assigned client text."""
+    result = draft_service.apply_redistribution(draft_id, request.get("sections", []))
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "content_redistributed",
+                            summary=f"{len(request.get('sections', []))} sections")
+    return {"success": True, "draft": result}
+
+
+@router.post("/{draft_id}/redistribute/commit")
+async def commit_redistribution_endpoint(
+    draft_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Rebuild the Good TOC from the redistribution editor (renames/adds/removes) and set content+baseline.
+    Body: {sections: [{level, id, title, content, include}]} (full ordered final structure)."""
+    result = draft_service.commit_final_structure(draft_id, request.get("sections", []))
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not save the structure")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "redistribution_committed",
+                            summary=f"{len(request.get('sections', []))} sections")
+    return {"success": True, "draft": result}
+
+
+# Per-section review pipeline (review_mode drafts): benchmark → law → close
+
+@router.post("/{draft_id}/topics/{topic_id}/review/benchmark")
+async def review_benchmark_endpoint(
+    draft_id: str,
+    topic_id: str,
+    subtopic_id: Optional[str] = None,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Step 1: functional benchmark review for one section. Returns baseline + benchmark references
+    and two suggestions (tweak-to-fix-gaps and use-benchmark-as-is). Read-only."""
+    result = await draft_service.assess_benchmark_for_unit(
+        draft_id=draft_id, topic_id=topic_id,
+        vector_store=get_store(), llm_service=get_llm(), subtopic_id=subtopic_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
+@router.post("/{draft_id}/topics/{topic_id}/review/regulation")
+async def review_regulation_endpoint(
+    draft_id: str,
+    topic_id: str,
+    subtopic_id: Optional[str] = None,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Step 2: law/regulation check for one section via RAG over the draft's regulations.
+    Returns {applies, extract, suggestion}. Read-only."""
+    result = await draft_service.check_regulation_for_unit(
+        draft_id=draft_id, topic_id=topic_id,
+        vector_store=get_store(), llm_service=get_llm(), subtopic_id=subtopic_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
+@router.post("/{draft_id}/topics/{topic_id}/review/apply")
+async def review_apply_endpoint(
+    draft_id: str,
+    topic_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Persist reviewer-approved content for a section and advance its review_step
+    (benchmark | regulation | review). Body: {content, step?, subtopic_id?}."""
+    content = request.get("content")
+    if content is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="content is required")
+    result = await draft_service.apply_section_content(
+        draft_id=draft_id, topic_id=topic_id, content=content,
+        subtopic_id=request.get("subtopic_id"), step=(request.get("step") or "review"),
+        llm_service=get_llm(),
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
+@router.post("/{draft_id}/topics/{topic_id}/review/close")
+async def review_close_endpoint(
+    draft_id: str,
+    topic_id: str,
+    request: dict = None,
+    subtopic_id: Optional[str] = None,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Bank a content-ready section (review_step='closed'), or reopen it. Body: {subtopic_id?, reopen?}."""
+    body = request or {}
+    result = draft_service.close_section(
+        draft_id=draft_id, topic_id=topic_id,
+        subtopic_id=body.get("subtopic_id") or subtopic_id, reopen=bool(body.get("reopen", False)),
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
+@router.post("/{draft_id}/topics/{topic_id}/review/chat")
+async def review_chat_endpoint(
+    draft_id: str,
+    topic_id: str,
+    request: dict,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Per-section review chatbot. Body: {message, subtopic_id?}. Returns {reply, proposed_content}
+    where proposed_content (when present) is previewed and applied via the review/apply endpoint."""
+    message = request.get("message")
+    if not message:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="message is required")
+    result = await draft_service.review_chat_for_unit(
+        draft_id=draft_id, topic_id=topic_id, message=message,
+        vector_store=get_store(), llm_service=get_llm(), subtopic_id=request.get("subtopic_id"),
+    )
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
 # Template endpoint removed - no longer using Excel templates
 
 @router.post("/test/regulations-retrieval")

@@ -309,6 +309,9 @@ class TOCTopic(BaseModel):
     # Gap-assessment review fields (Review Policy / review_mode drafts)
     gap_report_json: Optional[str] = Field(None, description="Serialized GapReport for this topic")
     gap_status: str = Field(default="pending", description="Gap review status: pending | assessed | applied")
+    # Review pipeline (v2): frozen client baseline + per-section step driver
+    baseline_content: str = Field(default="", description="Frozen client baseline content for this section (review drafts); never overwritten by generation")
+    review_step: str = Field(default="pending", description="Review pipeline step: pending | benchmark | regulation | review | closed")
     added_from_benchmark: bool = Field(default=False, description="True if this topic was auto-added because the client policy lacked it")
     benchmark_match: Optional[str] = Field(None, description="Benchmark section this topic maps to (set at TOC reconciliation, reused by gap-report)")
     reconcile_note: Optional[str] = Field(None, description="Short rationale for a reconciliation merge/rename/add")
@@ -326,6 +329,9 @@ class TOCSubtopic(BaseModel):
     # Gap-assessment review fields (per-subtopic gap units)
     gap_report_json: Optional[str] = Field(None, description="Serialized GapReport for this subtopic")
     gap_status: str = Field(default="pending", description="Gap review status: pending | assessed | applied")
+    # Review pipeline (v2): frozen client baseline + per-section step driver
+    baseline_content: str = Field(default="", description="Frozen client baseline content for this section (review drafts); never overwritten by generation")
+    review_step: str = Field(default="pending", description="Review pipeline step: pending | benchmark | regulation | review | closed")
     benchmark_match: Optional[str] = Field(None, description="Benchmark subtopic this subtopic maps to")
 
 
@@ -387,6 +393,8 @@ class DraftMetadata(BaseModel):
     good_toc_json: Optional[str] = Field(None, description="The reconciled recommendation (read-only 'Good' column); the editable working TOC is `toc`")
     good_toc_basis_json: Optional[str] = Field(None, description="Snapshot of the Current + Extracted TOCs the Good TOC was last derived from; the 'Regenerate' action shows only when one has since changed")
     toc_approved: bool = Field(default=False, description="True once the reviewer approves the good/working TOC; unlocks the per-section pipeline")
+    content_mapped: bool = Field(default=False, description="True once the client content has been mapped into the Good TOC at least once; gates the Approve action. Reset whenever the Good TOC structure changes.")
+    redistribution_cache_json: Optional[str] = Field(None, description="Cached content-redistribution result: {sig, assignments} so re-proposing skips embeddings+LLM when the Good TOC/original content are unchanged")
 
     @property
     def effective_policy_type(self) -> str:

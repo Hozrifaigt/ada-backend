@@ -30,14 +30,18 @@ class WordExportService:
             BytesIO: Word document as bytes
         """
         try:
+            # Review drafts: export only the banked (closed) sections once any have been closed.
+            # If nothing is closed yet, fall back to exporting everything.
+            draft_data = self._filter_review_draft(draft_data)
+
             doc = Document()
-            
+
             # Set up styles
             self._setup_styles(doc)
-            
+
             # Add title page
             self._add_title_page(doc, draft_data['metadata'])
-            
+
             # Add page break before table of contents
             doc.add_page_break()
 
@@ -61,7 +65,38 @@ class WordExportService:
         except Exception as e:
             logger.error(f"Failed to export draft to Word: {e}")
             raise ValueError(f"Word export failed: {str(e)}")
-    
+
+    def _filter_review_draft(self, draft_data: Dict[str, Any]) -> Dict[str, Any]:
+        """For review_mode drafts, keep only banked (review_step == 'closed') sections in the export.
+        A topic is kept if it is closed or has any closed subtopic; only closed subtopics are kept.
+        If no section is closed yet, the draft is returned unchanged (export everything)."""
+        metadata = draft_data.get('metadata') or {}
+        if not metadata.get('review_mode'):
+            return draft_data
+        toc = draft_data.get('toc') or []
+
+        def is_closed(unit):
+            return (unit or {}).get('review_step') == 'closed'
+
+        any_closed = any(
+            is_closed(t) or any(is_closed(s) for s in (t.get('subtopics') or []))
+            for t in toc
+        )
+        if not any_closed:
+            return draft_data
+
+        filtered = []
+        for t in toc:
+            closed_subs = [s for s in (t.get('subtopics') or []) if is_closed(s)]
+            if is_closed(t) or closed_subs:
+                kept = dict(t)
+                kept['subtopics'] = closed_subs
+                filtered.append(kept)
+
+        out = dict(draft_data)
+        out['toc'] = filtered
+        return out
+
     def _setup_styles(self, doc: Document):
         """Set up document styles."""
         try:

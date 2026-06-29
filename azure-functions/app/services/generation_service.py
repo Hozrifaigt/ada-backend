@@ -581,13 +581,19 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         regulation_chunks: List[RegulationChunk] = None,
         benchmark_topic_name: Optional[str] = None,
         surrounding_context: str = "",
+        benchmark_only: bool = False,
     ) -> GapReport:
-        """Compare a client topic's content against the benchmark + regulations and return a structured gap report."""
-        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
-        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
-        if uploaded_regs:
-            sep = "\n\n" if regulations_context else ""
-            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
+        """Compare a client topic's content against the benchmark + regulations and return a structured gap report.
+        benchmark_only=True scopes the assessment to the benchmark (no regulation context) for the Review tab's
+        Benchmark step."""
+        if benchmark_only:
+            regulations_context = ""
+        else:
+            regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
+            uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
+            if uploaded_regs:
+                sep = "\n\n" if regulations_context else ""
+                regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
 
         prompt = self.prompt_manager.get_prompt(
             "gap_assessment",
@@ -820,6 +826,136 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         )
         response = await llm_service.generate(prompt)
         return response.strip()
+
+    # ============================================================
+    # REVIEW PIPELINE (review_mode drafts — per-section benchmark → law → close)
+    # ============================================================
+
+    def _regulations_context(self, draft, regulation_chunks) -> str:
+        """Azure Search regulation chunks + the draft's uploaded regulation text, formatted for a prompt."""
+        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
+        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
+        if uploaded_regs:
+            sep = "\n\n" if regulations_context else ""
+            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
+        return regulations_context
+
+    async def generate_benchmark_as_is(
+        self, topic_title: str, baseline_content: str, benchmark_content: Optional[str],
+        draft, llm_service,
+    ) -> str:
+        """The 'use benchmark as-is' rewrite: the benchmark section adapted to this client (prose)."""
+        prompt = self.prompt_manager.get_prompt(
+            "benchmark_as_is",
+            topic_title=topic_title,
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            detail_level=self._map_detail_level(draft.metadata.detail_level),
+            baseline_content=baseline_content or "(none yet)",
+            benchmark_content=benchmark_content or "None available",
+        )
+        response = await llm_service.generate(prompt)
+        return response.strip()
+
+    async def review_regulation_check(
+        self, topic_title: str, existing_content: str, draft, llm_service,
+        regulation_chunks: List[RegulationChunk] = None,
+    ) -> Dict[str, Any]:
+        """Law/regulation check of one section → {applies, extract, suggestion}."""
+        regulations_context = self._regulations_context(draft, regulation_chunks)
+        if not (regulations_context or "").strip():
+            return {"applies": False, "extract": "", "suggestion": ""}
+        prompt = self.prompt_manager.get_prompt(
+            "review_regulation",
+            topic_title=topic_title,
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            existing_content=existing_content or "(none yet)",
+            regulations_context=regulations_context,
+        )
+        response = await llm_service.generate(prompt)
+        try:
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse review_regulation JSON for '{topic_title}': {e}")
+            return {"applies": False, "extract": "", "suggestion": ""}
+        return {
+            "applies": bool(data.get("applies", False)),
+            "extract": str(data.get("extract", "")).strip(),
+            "suggestion": str(data.get("suggestion", "")).strip(),
+        }
+
+    async def redistribute_assignments(
+        self, good: List[Dict[str, Any]], sources: List[Dict[str, Any]],
+        leftover_indices: List[int], suggestions: Dict[int, int], filled_targets: set,
+        draft, llm_service,
+    ) -> Dict[int, int]:
+        """Ask the LLM to assign the LEFTOVER client content units (the ones exact-title matching didn't
+        place) to the best NEW section, respecting topic/subtopic level and the embedding `suggestions`.
+        Returns {source_index: good_index} (good_index -1 = unassigned). Falls back to the suggestions."""
+        good_block = "\n".join(
+            f"{i}: [{g.get('level', 'topic')}]{' (already filled)' if i in filled_targets else ''} {g['title']}"
+            for i, g in enumerate(good)
+        )
+        src_block = "\n".join(
+            f"{i}: [{sources[i].get('level', 'topic')}] [suggested {suggestions.get(i, -1)}] {sources[i]['title']} — "
+            f"{(sources[i]['content'] or '').strip()[:300].replace(chr(10), ' ')}"
+            for i in leftover_indices
+        )
+        prompt = self.prompt_manager.get_prompt(
+            "redistribute_content",
+            document_title=draft.metadata.title,
+            good_sections=good_block,
+            source_units=src_block,
+        )
+        try:
+            response = await llm_service.generate(prompt)
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse redistribute_content JSON: {e}")
+            return {i: suggestions.get(i, -1) for i in leftover_indices}
+        out: Dict[int, int] = {}
+        for a in data.get("assignments", []):
+            try:
+                out[int(a["unit"])] = int(a["section"])
+            except (TypeError, ValueError, KeyError):
+                continue
+        # Any leftover the LLM omitted falls back to its embedding suggestion.
+        for i in leftover_indices:
+            if i not in out:
+                out[i] = suggestions.get(i, -1)
+        return out
+
+    async def review_chat_turn(
+        self, topic_title: str, baseline_content: str, existing_content: str,
+        benchmark_content: Optional[str], whole_policy_text: str, user_message: str,
+        conversation_history: str, draft, llm_service, regulation_chunks: List[RegulationChunk] = None,
+    ) -> Dict[str, Any]:
+        """One turn of the per-section review chat → {reply, proposed_content}."""
+        prompt = self.prompt_manager.get_prompt(
+            "review_chat",
+            topic_title=topic_title,
+            document_title=draft.metadata.title,
+            industry=draft.metadata.client_metadata.industry,
+            detail_level=self._map_detail_level(draft.metadata.detail_level),
+            baseline_content=baseline_content or "(none yet)",
+            existing_content=existing_content or "(none yet)",
+            benchmark_content=benchmark_content or "None available",
+            whole_policy_text=whole_policy_text or "(none)",
+            regulations_context=self._regulations_context(draft, regulation_chunks) or "None available",
+            conversation_history=conversation_history or "(none)",
+            user_message=user_message,
+        )
+        response = await llm_service.generate(prompt)
+        try:
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse review_chat JSON for '{topic_title}': {e}")
+            return {"reply": response.strip(), "proposed_content": None}
+        proposed = data.get("proposed_content")
+        if proposed is not None:
+            proposed = str(proposed).strip() or None
+        return {"reply": str(data.get("reply", "")).strip(), "proposed_content": proposed}
 
 
     async def _generate_with_references(

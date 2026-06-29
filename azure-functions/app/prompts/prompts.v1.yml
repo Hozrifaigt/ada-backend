@@ -487,11 +487,12 @@ adapt_with_gap:
 
     Apply the detail level ({detail_level}) to determine prescriptiveness, length, and granularity.
 
-    FULL TABLE OF CONTENTS:
-    (Note: [COMPLETED] indicates topics with existing content, [PENDING] indicates topics yet to be created)
+    FULL TABLE OF CONTENTS (CONTEXT ONLY — never reproduce any of this in your output):
+    (The [COMPLETED]/[PENDING]/[Brief]/[Content] markers are for your awareness only; they are NOT part of any
+    section's content and must never appear in your answer.)
     {full_table_of_contents}
 
-    PREVIOUS TOPICS SUMMARY:
+    PREVIOUS TOPICS SUMMARY (context only — do not reproduce):
     {previous_topics}
 
     RELEVANT REGULATION SECTIONS:
@@ -519,9 +520,15 @@ adapt_with_gap:
     4. When a change cites a regulation, use inline citations with the EXACT article numbers from the regulation sections above. Do not invent article numbers.
     5. Keep the professional tone and structure appropriate for the {industry} industry.
     6. Follow the detail level specification ({detail_level}).
-    7. Return the FULL revised topic content (baseline with the confirmed changes applied), not a diff or a summary.
+    7. SCOPE — output the revised content for THIS ONE section ONLY (the baseline with the confirmed changes
+       applied). This is a single section of a larger policy, NOT the whole document.
+    8. Do NOT reproduce the table of contents or any other section. Do NOT output the document title, the
+       section numbers/headings of other sections, or any "[COMPLETED]" / "[PENDING]" / "[Brief]" / "[Content]"
+       markers — those were given to you only as context.
+    9. Do NOT add any preamble, explanation, or closing remarks (e.g. "Below is the revised content…",
+       "All other sections remain unchanged…"). Begin directly with the section's content and stop when it ends.
 
-    REVISED CONTENT:
+    REVISED CONTENT FOR THIS SECTION ONLY (prose, no TOC, no markers, no commentary):
 
 generate_with_references:
   template: |
@@ -1016,3 +1023,145 @@ suggest_toc_topics:
     }}
 
     JSON RESPONSE:
+
+benchmark_as_is:
+  template: |
+    You are a senior policy consultant adapting a good-standard BENCHMARK section so it can be used as THIS
+    client's version of the section (the "use benchmark as-is" option — used when the client's baseline is
+    weak or absent).
+
+    SECTION BEING REVIEWED: {topic_title}
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Industry: {industry}
+    Detail Level: {detail_level}
+
+    CLIENT'S BASELINE CONTENT (their original text; may say "(none yet)"):
+    {baseline_content}
+
+    GOOD-STANDARD BENCHMARK CONTENT FOR THIS SECTION:
+    {benchmark_content}
+
+    INSTRUCTIONS:
+    1. Rewrite the benchmark content as this client's section: adopt their name, industry and terminology,
+       and match the detail level above. Drop the benchmark organization's own specifics.
+    2. Do not invent regulatory citations — compliance is handled in a separate step.
+    3. Return ONLY the section content as prose (no headings, no JSON, no commentary).
+
+    ADAPTED SECTION CONTENT:
+
+review_regulation:
+  template: |
+    You are a senior policy consultant performing the LAW / REGULATION check on ONE section of a client
+    policy. You are given the section's current content and the regulation excerpts retrieved for it.
+
+    Decide whether the retrieved regulations ACTUALLY apply to this section. Many sections have no relevant
+    regulation — in that case say so and stop (do not invent obligations).
+
+    SECTION BEING REVIEWED: {topic_title}
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Industry: {industry}
+
+    SECTION'S CURRENT CONTENT:
+    {existing_content}
+
+    RETRIEVED REGULATION SECTIONS (may be empty or irrelevant):
+    {regulations_context}
+
+    INSTRUCTIONS:
+    1. If none of the retrieved regulations genuinely govern this section, set "applies" to false and leave
+       "extract" and "suggestion" empty. Do NOT stretch an unrelated regulation to fit.
+    2. If a regulation does apply, set "applies" to true, put the SHORT verbatim regulation excerpt(s) that
+       matter into "extract" (with article numbers), and in "suggestion" give the concrete text/clause the
+       reviewer should embed into the section to be compliant. Cite exact article numbers — never invent them.
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "applies": true,
+      "extract": "verbatim regulation excerpt with article number(s), or empty",
+      "suggestion": "concrete clause to embed into the section for compliance, or empty"
+    }}
+
+redistribute_content:
+  template: |
+    You are mapping the LEFTOVER pieces of a client's policy content into a NEW table of contents for a
+    review. The obvious same-title matches were already assigned automatically — you only handle the harder
+    cases below. The new TOC renamed, merged, split, and added sections, so match by MEANING.
+
+    POLICY: {document_title}
+
+    NEW SECTIONS (the target structure — assign content into these by index). Each line:
+    "<index>: [topic|subtopic] (already filled?) <title>". "topic" is a main section; "subtopic" is a
+    child of a topic. Sections marked "(already filled)" already received their primary content.
+    {good_sections}
+
+    CLIENT'S LEFTOVER CONTENT UNITS (each line: "<index>: [topic|subtopic] [suggested <section>] <title> — <snippet>"):
+    The "suggested" number is a similarity hint from an embedding pre-filter; override it when the meaning
+    clearly fits a different new section.
+    {source_units}
+
+    INSTRUCTIONS:
+    1. Assign EACH leftover unit to the single NEW section it best belongs to, by meaning/topic.
+    2. RESPECT LEVEL: a [topic] unit (a main section's own text) belongs in a [topic] section — do NOT put it
+       inside a [subtopic]. A [subtopic] unit usually belongs in a [subtopic], or in its parent [topic] if no
+       subtopic fits.
+    3. Prefer a section that is NOT "(already filled)" when two sections fit equally well.
+    4. If a unit does not belong to ANY new section, assign it section -1 (flagged as unassigned).
+    5. Do not assign one unit to multiple sections. Every unit appears exactly once. Output ONLY indices.
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "assignments": [
+        {{"unit": 0, "section": 3}},
+        {{"unit": 1, "section": -1}}
+      ]
+    }}
+
+review_chat:
+  template: |
+    You are a senior policy consultant assisting a reviewer on ONE section of a client policy, through a
+    chat. The reviewer may ask a question, or ask you to change the section's content (e.g. "only keep 3 of
+    those bullets", "make it shorter", "merge in the benchmark wording for X").
+
+    SECTION: {topic_title}
+
+    DOCUMENT CONTEXT:
+    Title: {document_title}
+    Industry: {industry}
+    Detail Level: {detail_level}
+
+    CLIENT'S BASELINE CONTENT (their original text; preserve it where adequate):
+    {baseline_content}
+
+    SECTION'S CURRENT WORKING CONTENT (what the reviewer is editing):
+    {existing_content}
+
+    GOOD-STANDARD BENCHMARK CONTENT FOR THIS SECTION (reference):
+    {benchmark_content}
+
+    THE WHOLE CLIENT POLICY (for cross-section consolidation requests):
+    {whole_policy_text}
+
+    APPLICABLE REGULATION SECTIONS (may be empty):
+    {regulations_context}
+
+    CONVERSATION SO FAR:
+    {conversation_history}
+
+    REVIEWER MESSAGE:
+    {user_message}
+
+    INSTRUCTIONS:
+    1. Always write a short conversational "reply" to the reviewer.
+    2. If (and only if) the reviewer asked you to change the section content, also return the FULL revised
+       section content in "proposed_content" (prose, no headings). Preserve the baseline where adequate and
+       apply only what was asked. If the reviewer only asked a question, set "proposed_content" to null.
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{
+      "reply": "your short conversational reply",
+      "proposed_content": "full revised section content, or null if no change was requested"
+    }}

@@ -1,6 +1,7 @@
 import uuid
 import json
 import asyncio
+import hashlib
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
@@ -471,6 +472,14 @@ class DraftService:
             # The editable working TOC is `toc` itself; it may diverge from this as the reviewer edits.
             draft_metadata.good_toc_json = self._slim_toc_json(toc)
             draft_metadata.good_toc_basis_json = self._toc_basis(draft_metadata)
+
+            # Freeze the client's redistributed content as the per-section baseline (review pipeline v2).
+            # baseline_content is the reviewer's untouched reference; section generation edits `content`,
+            # never baseline_content.
+            for t in toc:
+                t.baseline_content = t.content or ""
+                for s in t.subtopics:
+                    s.baseline_content = s.content or ""
 
             draft_to_save = CompleteDraft(
                 id=draft_id,
@@ -1089,6 +1098,8 @@ class DraftService:
                         conversation_history=existing_subtopic.conversation_history if existing_subtopic else [],
                         gap_report_json=existing_subtopic.gap_report_json if existing_subtopic else None,
                         gap_status=existing_subtopic.gap_status if existing_subtopic else "pending",
+                        baseline_content=existing_subtopic.baseline_content if existing_subtopic else "",
+                        review_step=existing_subtopic.review_step if existing_subtopic else "pending",
                         benchmark_match=existing_subtopic.benchmark_match if existing_subtopic else None,
                     )
                     subtopics.append(subtopic)
@@ -1105,6 +1116,8 @@ class DraftService:
                     subtopics=subtopics,
                     gap_report_json=existing_topic.gap_report_json if existing_topic else None,
                     gap_status=existing_topic.gap_status if existing_topic else "pending",
+                    baseline_content=existing_topic.baseline_content if existing_topic else "",
+                    review_step=existing_topic.review_step if existing_topic else "pending",
                     added_from_benchmark=existing_topic.added_from_benchmark if existing_topic else False,
                     benchmark_match=existing_topic.benchmark_match if existing_topic else None,
                     reconcile_note=existing_topic.reconcile_note if existing_topic else None,
@@ -1113,6 +1126,10 @@ class DraftService:
 
             # Update TOC in the model
             draft_model.toc = toc_topics
+            # Editing the Good/working TOC invalidates a prior approval AND the content mapping — the
+            # reviewer must re-map then re-approve the new structure.
+            draft_model.metadata.toc_approved = False
+            draft_model.metadata.content_mapped = False
             draft_model.metadata.modified_at = datetime.now(timezone.utc).isoformat()
 
             logger.info(f"Updated TOC with {len(toc_topics)} topics")
@@ -1760,12 +1777,67 @@ class DraftService:
                 subs = []
         return subs or []
 
+    def _flatten_benchmark_units(self, benchmark_topics) -> List[Dict[str, Any]]:
+        """Every benchmark unit — each top-level topic's intro AND each subtopic — as {name, content}.
+        Matching against this (not just top-level titles) lets a renamed/flattened client section reach
+        the benchmark's NESTED content (e.g. a section that maps to a benchmark subtopic)."""
+        out: List[Dict[str, Any]] = []
+        for bt in benchmark_topics or []:
+            name = (bt.get("topic") or bt.get("name") or "").strip()
+            if name:
+                out.append({"name": name, "content": (bt.get("topic_content") or bt.get("content") or "").strip()})
+            for s in self._benchmark_subtopics(bt):
+                sname = (s.get("name") or s.get("topic") or "").strip()
+                if sname:
+                    out.append({"name": sname, "content": (s.get("content") or s.get("topic_content") or "").strip()})
+        return out
+
+    def _best_benchmark_unit(self, query_title, query_content, benchmark_topics, vector_store, threshold: float = 0.78):
+        """Best-matching benchmark unit (topic OR subtopic) by TITLE + CONTENT embedding. Returns
+        (content, name), or (None, None) when nothing clears the confidence threshold — so an unrelated
+        benchmark section is never forced as a match (the 'matched Purpose & Objective for a procurement
+        section' bug)."""
+        units = self._flatten_benchmark_units(benchmark_topics)
+        if not units:
+            return None, None
+        target = (query_title or "").strip().lower()
+        for u in units:  # exact title match wins immediately
+            if target and u["name"].strip().lower() == target:
+                return (u["content"] or None), u["name"]
+        if not vector_store:
+            return None, None
+        q = self._embed(f"{query_title} {(query_content or '')[:800]}".strip(), vector_store)
+        if q is None:
+            return None, None
+        best, best_score = None, 0.0
+        for u in units:
+            cand = self._embed(f"{u['name']} {(u['content'] or '')[:800]}".strip(), vector_store)
+            if cand is None:
+                continue
+            sc = self._cosine(q, cand)
+            if sc > best_score:
+                best, best_score = u, sc
+        if best is not None and best_score >= threshold:
+            return (best["content"] or None), best["name"]
+        return None, None
+
     def _benchmark_content_for_unit(self, topic, subtopic, benchmark_topics, vector_store):
-        """Return (benchmark_content, benchmark_name) for a gap unit (topic or subtopic).
-        Subtopic → matched benchmark subtopic (fallback: topic intro); topic-with-subtopics →
-        intro only; topic-without-subtopics → full flatten (legacy)."""
+        """Return (benchmark_content, benchmark_name) for a gap unit, matched by TITLE + CONTENT across
+        the whole benchmark tree (topics + subtopics), confidence-gated."""
+        # Leaf top-level section → search the whole benchmark tree by title+content (handles renamed /
+        # flattened sections like "High-Level TEC Procurement" → benchmark's nested "Procurement Governance").
+        if subtopic is None and not getattr(topic, "subtopics", None):
+            return self._best_benchmark_unit(
+                topic.topic, getattr(topic, "baseline_content", "") or (topic.content or ""),
+                benchmark_topics, vector_store)
+
         bt = self._benchmark_for_topic(topic, benchmark_topics, vector_store)
         if not bt:
+            # Parent topic didn't resolve — for a subtopic, still try the whole tree by title+content.
+            if subtopic is not None:
+                return self._best_benchmark_unit(
+                    subtopic.topic, getattr(subtopic, "baseline_content", "") or (subtopic.content or ""),
+                    benchmark_topics, vector_store)
             return None, None
         topic_name = bt.get("topic") or bt.get("name")
         if subtopic is not None:
@@ -1781,13 +1853,13 @@ class DraftService:
                 name = msub.get("name") or msub.get("topic")
                 content = (msub.get("content") or msub.get("topic_content") or "").strip() or None
                 return content, name
-            # No matching benchmark subsection — fall back to the FULL benchmark topic (intro + all its
-            # subsections), not just the intro, so the assessor sees the relevant benchmark context
-            # rather than an unrelated snippet (Stage 3a layered fallback).
-            return (self._benchmark_topic_text(bt) or None), topic_name
-        if getattr(topic, "subtopics", None):
-            return (self._benchmark_topic_intro(bt) or None), topic_name
-        return (self._benchmark_topic_text(bt) or None), topic_name
+            # No matching subsection under the matched parent — search the whole tree by title+content
+            # rather than dumping the unrelated parent topic.
+            return self._best_benchmark_unit(
+                subtopic.topic, getattr(subtopic, "baseline_content", "") or (subtopic.content or ""),
+                benchmark_topics, vector_store)
+        # Topic WITH subtopics → its intro only (the subtopics are assessed on their own).
+        return (self._benchmark_topic_intro(bt) or None), topic_name
 
     def _surrounding_context_for_unit(self, topic, subtopic, draft=None) -> str:
         """Read-only context so a unit isn't assessed in isolation: parent intro + sibling subsections
@@ -2130,6 +2202,8 @@ class DraftService:
                     summary=(smatch.summary if smatch else ""),
                     conversation_history=(smatch.conversation_history if smatch else []),
                     gap_status=(smatch.gap_status if smatch else "pending"),
+                    baseline_content=(smatch.baseline_content if smatch else ""),
+                    review_step=(smatch.review_step if smatch else "pending"),
                     benchmark_match=(smatch.benchmark_match if smatch else None),
                 ))
             new_models.append(TOCTopic(
@@ -2140,6 +2214,8 @@ class DraftService:
                 conversation_history=(match.conversation_history if match else []),
                 subtopics=sub_models,
                 gap_status=(match.gap_status if match else "pending"),
+                baseline_content=(match.baseline_content if match else ""),
+                review_step=(match.review_step if match else "pending"),
                 added_from_benchmark=(match.added_from_benchmark if match else False),
                 benchmark_match=(match.benchmark_match if match else None),
             ))
@@ -2147,6 +2223,9 @@ class DraftService:
             return None
         draft.toc = new_models
         draft.metadata.good_toc_json = self._slim_toc_json(new_models)
+        # Adopting a new working structure invalidates a prior approval + content mapping.
+        draft.metadata.toc_approved = False
+        draft.metadata.content_mapped = False
         draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
         self.storage.update_draft(draft_id, draft)
         return draft.model_dump()
@@ -2215,11 +2294,15 @@ class DraftService:
                     subtopic_id=(ws.subtopic_id if ws else str(uuid.uuid4())), topic=st, order=j,
                     content=(ws.content if ws else ""), summary=(ws.summary if ws else ""),
                     conversation_history=(ws.conversation_history if ws else []),
+                    baseline_content=(ws.baseline_content if ws else ""),
+                    review_step=(ws.review_step if ws else "pending"),
                 ))
             out.append(TOCTopic(
                 topic_id=(w.topic_id if w else str(uuid.uuid4())), topic=title, order=i,
                 content=(w.content if w else ""), summary=(w.summary if w else ""),
                 conversation_history=(w.conversation_history if w else []), subtopics=subs,
+                baseline_content=(w.baseline_content if w else ""),
+                review_step=(w.review_step if w else "pending"),
                 benchmark_match=(w.benchmark_match if w else None),
             ))
         return out
@@ -2258,6 +2341,9 @@ class DraftService:
         draft.toc = new_toc
         draft.metadata.good_toc_json = self._slim_toc_json(new_toc)
         draft.metadata.good_toc_basis_json = self._toc_basis(draft.metadata)
+        # Regenerating the working TOC invalidates a prior approval + content mapping.
+        draft.metadata.toc_approved = False
+        draft.metadata.content_mapped = False
         if note:
             draft.metadata.toc_reconciliation_note = note
         draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
@@ -2312,6 +2398,442 @@ class DraftService:
             draft=draft, llm_service=llm_service, regulation_chunks=regulation_chunks,
         )
         return {"content": content, "word_count": len(content.split()), "message": "Consolidated draft generated"}
+
+    # ===== Content redistribution (map original client content → current Good TOC) =====
+
+    async def propose_redistribution(self, draft_id: str, vector_store, llm_service) -> Optional[Dict[str, Any]]:
+        """Map the client's ORIGINAL content (version-0 snapshot) into the CURRENT Good TOC by meaning,
+        not by title. Embedding pre-filter ranks candidates, then the LLM assigns each original unit to the
+        best Good section. Returns a PROPOSAL (per-section proposed content + sources + unassigned) for the
+        reviewer to confirm — nothing is persisted here."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        # Source of truth for the client's original text = the 'original' version snapshot (falls back to
+        # the current draft if no snapshot exists).
+        original = self.storage.get_original_version(draft_id) or draft
+
+        # Source units = every original topic/subtopic that actually has content (tagged with its level).
+        sources: List[Dict[str, Any]] = []
+        for t in original.toc:
+            if (t.content or "").strip():
+                sources.append({"title": t.topic, "content": t.content, "level": "topic"})
+            for s in t.subtopics:
+                if (s.content or "").strip():
+                    sources.append({"title": s.topic, "content": s.content, "level": "subtopic"})
+
+        # Target = the current Good TOC (topics + subtopics, tagged with level + current content).
+        good: List[Dict[str, Any]] = []
+        for t in draft.toc:
+            good.append({"topic_id": t.topic_id, "subtopic_id": None, "title": t.topic, "level": "topic", "content": t.content or ""})
+            for s in t.subtopics:
+                good.append({"topic_id": t.topic_id, "subtopic_id": s.subtopic_id, "title": s.topic, "level": "subtopic", "content": s.content or ""})
+
+        # Target descriptors (a stable key per Good section). current_content lets the editor reopen
+        # without re-seeding over edits the reviewer already saved.
+        targets_out = [
+            {"key": f"{g['topic_id']}|{g['subtopic_id'] or ''}", "topic_id": g["topic_id"],
+             "subtopic_id": g["subtopic_id"], "title": g["title"], "level": g["level"],
+             "current_content": g.get("content", "")}
+            for g in good
+        ]
+
+        if not sources or not good:
+            return {"sources": [], "targets": targets_out, "assignments": {}}
+
+        # Cache: the embeddings + LLM call are the only expensive parts. When the Good TOC and the original
+        # content are unchanged since last time, reuse the cached assignment and just re-compose (cheap).
+        sig = self._redistribution_signature(good, sources)
+        assigned = self._cached_assignments(draft, sig, len(sources))
+        if assigned is None:
+            assigned = await self._compute_redistribution_assignments(good, sources, vector_store, llm_service, draft)
+            self._store_redistribution_cache(draft_id, draft, sig, assigned, len(sources))
+
+        # Editable payload: the reviewer can re-target any source unit (topic↔topic, subtopic↔subtopic),
+        # so we return the raw source units, the target sections, and the per-source assignment (target key
+        # or "unassigned"). The frontend composes each section's content live and sends the final mapping.
+        sources_out = []
+        assignments_out: Dict[str, str] = {}
+        for si, src in enumerate(sources):
+            gi = assigned.get(si, -1)
+            key = targets_out[gi]["key"] if (gi is not None and 0 <= gi < len(targets_out)) else "unassigned"
+            sources_out.append({"id": si, "title": src["title"], "content": src["content"], "level": src["level"]})
+            assignments_out[str(si)] = key
+
+        return {"sources": sources_out, "targets": targets_out, "assignments": assignments_out}
+
+    @staticmethod
+    def _redistribution_signature(good: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> str:
+        """Fingerprint the inputs to the mapping: the Good TOC structure (titles + levels, in order) and the
+        original source units (titles + levels). If neither changed, the cached assignment is still valid."""
+        good_part = "||".join(f"{g['level']}:{(g['title'] or '').strip().lower()}" for g in good)
+        src_part = "||".join(f"{s['level']}:{(s['title'] or '').strip().lower()}" for s in sources)
+        return hashlib.md5(f"{good_part}##{src_part}".encode("utf-8")).hexdigest()
+
+    def _cached_assignments(self, draft, sig: str, n_sources: int) -> Optional[Dict[int, int]]:
+        """Return the cached {source_index: good_index} mapping when the signature matches, else None."""
+        raw = getattr(draft.metadata, "redistribution_cache_json", None)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return None
+        if data.get("sig") != sig:
+            return None
+        arr = data.get("assignments") or []
+        if len(arr) != n_sources:
+            return None
+        return {i: int(arr[i]) for i in range(n_sources)}
+
+    def _store_redistribution_cache(self, draft_id: str, draft, sig: str, assigned: Dict[int, int], n_sources: int) -> None:
+        """Persist the lightweight assignment (a list of indices, aligned to source order) so the next
+        propose is a cache hit. Only indices are stored — never the (large) content text."""
+        arr = [int(assigned.get(i, -1)) for i in range(n_sources)]
+        draft.metadata.redistribution_cache_json = json.dumps({"sig": sig, "assignments": arr})
+        try:
+            self.storage.update_draft(draft_id, draft)
+        except Exception as e:
+            logger.warning(f"Could not persist redistribution cache (non-fatal): {e}")
+
+    async def _compute_redistribution_assignments(
+        self, good: List[Dict[str, Any]], sources: List[Dict[str, Any]], vector_store, llm_service, draft
+    ) -> Dict[int, int]:
+        """Two-pass mapping: exact title match (level-aware) → embedding pre-filter + LLM for the leftovers.
+        Returns {source_index: good_index} (-1 = unassigned)."""
+        def _norm(x):
+            return (x or "").strip().lower()
+
+        # Pass 1 — EXACT title match, deterministic and level-aware (same level first, then cross-level).
+        # This guarantees same-named sections are placed (and a topic's own text never lands in a subtopic).
+        assigned: Dict[int, int] = {}          # source_index -> good_index
+        used_targets: set = set()
+        exact_targets: set = set()             # targets that received their primary (exact) content
+        for same_level_only in (True, False):
+            for si, src in enumerate(sources):
+                if si in assigned:
+                    continue
+                for gi, g in enumerate(good):
+                    if gi in used_targets:
+                        continue
+                    if same_level_only and g["level"] != src["level"]:
+                        continue
+                    if _norm(g["title"]) == _norm(src["title"]):
+                        assigned[si] = gi
+                        used_targets.add(gi)
+                        exact_targets.add(gi)
+                        break
+
+        # Pass 2 — embedding pre-filter (B) + LLM (C) for the leftovers only.
+        leftovers = [si for si in range(len(sources)) if si not in assigned]
+        if leftovers:
+            good_vecs = [self._embed(g["title"], vector_store) for g in good]
+            suggestions: Dict[int, int] = {}
+            for si in leftovers:
+                src = sources[si]
+                q = self._embed(f"{src['title']} {src['content'][:500]}", vector_store)
+                best_i, best_score = -1, 0.0
+                if q is not None:
+                    # Prefer same-level targets; fall back to any level only if none match.
+                    for same_level_only in (True, False):
+                        for gi, gv in enumerate(good_vecs):
+                            if gv is None:
+                                continue
+                            if same_level_only and good[gi]["level"] != src["level"]:
+                                continue
+                            sc = self._cosine(q, gv)
+                            if sc > best_score:
+                                best_i, best_score = gi, sc
+                        if best_i != -1:
+                            break
+                suggestions[si] = best_i
+            ai = await self.generation_service.redistribute_assignments(
+                good, sources, leftovers, suggestions, exact_targets, draft, llm_service
+            )
+            for si in leftovers:
+                assigned[si] = ai.get(si, suggestions.get(si, -1))
+        return assigned
+
+    def apply_redistribution(self, draft_id: str, sections: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Commit the reviewer-confirmed redistribution: for each section, set BOTH content and
+        baseline_content to the assigned (verbatim client) text. baseline now reflects the client's real
+        words mapped into the Good structure."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        for sec in sections or []:
+            topic, subtopic, unit = self._resolve_unit(draft, sec.get("topic_id"), sec.get("subtopic_id"))
+            if not unit:
+                continue
+            content = sec.get("content", "")
+            unit.content = content
+            unit.baseline_content = content
+        draft.metadata.content_mapped = True
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return draft.model_dump()
+
+    def commit_final_structure(self, draft_id: str, sections: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Rebuild the Good TOC from the redistribution editor (renames / adds / removes) AND set each
+        section's content + baseline. `sections` is the full ordered final structure:
+        [{level:'topic'|'subtopic', id, title, content, include}]. Subtopics attach to the preceding topic.
+        Existing units (matched by id) keep their non-content fields (review_step, gap, conversation).
+        `include`=False keeps a section's existing content rather than overwriting it."""
+        from app.models.draft_models import TOCTopic, TOCSubtopic
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        ex_topics = {t.topic_id: t for t in draft.toc}
+        ex_subs = {}
+        for t in draft.toc:
+            for s in t.subtopics:
+                ex_subs[s.subtopic_id] = s
+
+        new_toc: List[TOCTopic] = []
+        current_topic: Optional[TOCTopic] = None
+        order_t = 0
+        for sec in sections or []:
+            level = sec.get("level")
+            title = (sec.get("title") or "").strip()
+            if not title:
+                continue
+            sid = (sec.get("id") or "").strip()
+            include = bool(sec.get("include", True))
+            content = sec.get("content", "") or ""
+
+            if level == "topic":
+                order_t += 1
+                ex = ex_topics.get(sid)
+                if ex is not None:
+                    ex.topic = title
+                    ex.order = order_t
+                    ex.subtopics = []
+                    if include:
+                        ex.content = content
+                        ex.baseline_content = content
+                        ex.summary = ""
+                    topic = ex
+                else:
+                    topic = TOCTopic(
+                        topic_id=str(uuid.uuid4()), topic=title, order=order_t,
+                        content=(content if include else ""), summary="", conversation_history=[],
+                        subtopics=[], baseline_content=(content if include else ""), review_step="pending",
+                    )
+                new_toc.append(topic)
+                current_topic = topic
+            else:  # subtopic — attach to the most recent topic
+                if current_topic is None:
+                    # Orphan subtopic (no preceding topic) → promote to a topic so its content isn't lost.
+                    order_t += 1
+                    current_topic = TOCTopic(
+                        topic_id=str(uuid.uuid4()), topic=title, order=order_t,
+                        content=(content if include else ""), summary="", conversation_history=[],
+                        subtopics=[], baseline_content=(content if include else ""), review_step="pending",
+                    )
+                    new_toc.append(current_topic)
+                    continue
+                ex = ex_subs.get(sid)
+                sub_order = len(current_topic.subtopics) + 1
+                if ex is not None:
+                    ex.topic = title
+                    ex.order = sub_order
+                    if include:
+                        ex.content = content
+                        ex.baseline_content = content
+                        ex.summary = ""
+                    sub = ex
+                else:
+                    sub = TOCSubtopic(
+                        subtopic_id=str(uuid.uuid4()), topic=title, order=sub_order,
+                        content=(content if include else ""), summary="", conversation_history=[],
+                        baseline_content=(content if include else ""), review_step="pending",
+                    )
+                current_topic.subtopics.append(sub)
+
+        if not new_toc:
+            return None
+        draft.toc = new_toc
+        draft.metadata.good_toc_json = self._slim_toc_json(new_toc)
+        # The client content is now mapped into the Good TOC → unlocks Approve.
+        draft.metadata.content_mapped = True
+        # The structure changed → the redistribution assignment cache no longer matches; drop it.
+        draft.metadata.redistribution_cache_json = None
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return draft.model_dump()
+
+    # ===== Per-section review pipeline (review_mode drafts: benchmark → law → close) =====
+
+    def _resolve_unit(self, draft, topic_id: str, subtopic_id: Optional[str] = None):
+        """Resolve (topic, subtopic, unit) for a section pipeline call. unit = subtopic when given, else topic."""
+        topic = next((t for t in draft.toc if t.topic_id == topic_id), None)
+        if not topic:
+            return None, None, None
+        subtopic = None
+        if subtopic_id:
+            subtopic = next((s for s in topic.subtopics if s.subtopic_id == subtopic_id), None)
+            if not subtopic:
+                return topic, None, None
+        return topic, subtopic, (subtopic or topic)
+
+    async def _regulation_chunks_for_unit(self, draft, unit, vector_store):
+        """Regulation RAG for a section (non-fatal on failure)."""
+        try:
+            return await self.generation_service._search_relevant_regulations(
+                topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
+            )
+        except Exception as e:
+            logger.warning(f"Regulation search failed for section '{getattr(unit, 'topic', '')}' (non-fatal): {e}")
+            return []
+
+    async def assess_benchmark_for_unit(self, draft_id: str, topic_id: str, vector_store, llm_service,
+                                        subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Step 1 (benchmark gap assessment): compare the client section's baseline to its matched benchmark
+        section and return STRUCTURED, evidenced gap findings (benchmark source only) the reviewer ticks to
+        confirm, plus the 'use benchmark as-is' rewrite. The gap report is PERSISTED so 'fix gaps'
+        can apply the confirmed findings via the existing apply-gap merge engine."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic, subtopic, unit = self._resolve_unit(draft, topic_id, subtopic_id)
+        if not unit:
+            return None
+        benchmark_topics = self._get_benchmark_topics(draft, vector_store)
+        benchmark_content, benchmark_name = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
+        baseline = unit.baseline_content or unit.content or ""
+        surrounding = self._surrounding_context_for_unit(topic, subtopic, draft)
+
+        # Benchmark-only structured gap report + the as-is rewrite, concurrently.
+        report, as_is = await asyncio.gather(
+            self.generation_service.generate_gap_report(
+                topic_id=subtopic_id or topic_id, topic_title=unit.topic,
+                existing_content=baseline, benchmark_content=benchmark_content, draft=draft,
+                previous_policy_excerpt="", llm_service=llm_service, regulation_chunks=[],
+                benchmark_topic_name=benchmark_name, surrounding_context=surrounding, benchmark_only=True,
+            ),
+            self.generation_service.generate_benchmark_as_is(
+                topic_title=unit.topic, baseline_content=baseline, benchmark_content=benchmark_content,
+                draft=draft, llm_service=llm_service,
+            ),
+        )
+
+        # Keep only benchmark-sourced findings (regulations are handled in their own step).
+        report.findings = [f for f in report.findings if f.source == "benchmark"]
+        unit.gap_report_json = report.model_dump_json()
+        unit.gap_status = "assessed"
+        if unit.review_step == "pending":
+            unit.review_step = "benchmark"
+        if subtopic is not None and benchmark_name:
+            subtopic.benchmark_match = benchmark_name
+        self.storage.update_draft(draft_id, draft)
+
+        return {
+            "topic_id": topic_id,
+            "subtopic_id": subtopic_id,
+            "baseline_content": baseline,
+            "benchmark_content": benchmark_content or "",
+            "benchmark_match": benchmark_name,
+            "findings": [f.model_dump() for f in report.findings],
+            "as_is_suggestion": as_is,
+            "message": "Benchmark gap assessment generated",
+        }
+
+    async def check_regulation_for_unit(self, draft_id: str, topic_id: str, vector_store, llm_service,
+                                        subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Step 2 (law): RAG over the draft's regulations and decide whether any apply to this section.
+        Read-only — returns {applies, extract, suggestion} for the reviewer to accept/edit."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic, subtopic, unit = self._resolve_unit(draft, topic_id, subtopic_id)
+        if not unit:
+            return None
+        regulation_chunks = await self._regulation_chunks_for_unit(draft, unit, vector_store)
+        result = await self.generation_service.review_regulation_check(
+            topic_title=unit.topic, existing_content=unit.content or unit.baseline_content or "",
+            draft=draft, llm_service=llm_service, regulation_chunks=regulation_chunks,
+        )
+        result.update({"topic_id": topic_id, "subtopic_id": subtopic_id, "message": "Regulation check complete"})
+        return result
+
+    async def apply_section_content(self, draft_id: str, topic_id: str, content: str,
+                                    subtopic_id: Optional[str] = None, step: str = "review",
+                                    llm_service=None) -> Optional[Dict[str, Any]]:
+        """Persist reviewer-approved content for a section and advance its review_step
+        (benchmark | regulation | review). baseline_content is never touched."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic, subtopic, unit = self._resolve_unit(draft, topic_id, subtopic_id)
+        if not unit:
+            return None
+        word_count = len(content.split())
+        summary = ""
+        if word_count > 150 and llm_service is not None:
+            try:
+                summary = await self.generation_service.generate_summary(
+                    content=content, title=unit.topic, llm_service=llm_service
+                )
+            except Exception as e:
+                logger.warning(f"Summary generation failed (non-fatal): {e}")
+        unit.content = content
+        unit.summary = summary
+        if step in ("benchmark", "regulation", "review"):
+            unit.review_step = step
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return {"content": content, "summary": summary, "word_count": word_count,
+                "review_step": unit.review_step, "message": "Section content saved"}
+
+    def close_section(self, draft_id: str, topic_id: str, subtopic_id: Optional[str] = None,
+                      reopen: bool = False) -> Optional[Dict[str, Any]]:
+        """Bank a content-ready section (review_step='closed'), or reopen it (review_step='review')."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic, subtopic, unit = self._resolve_unit(draft, topic_id, subtopic_id)
+        if not unit:
+            return None
+        unit.review_step = "review" if reopen else "closed"
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return {"topic_id": topic_id, "subtopic_id": subtopic_id, "review_step": unit.review_step,
+                "message": ("Section reopened" if reopen else "Section closed")}
+
+    async def review_chat_for_unit(self, draft_id: str, topic_id: str, message: str, vector_store, llm_service,
+                                   subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Per-section review chatbot. Routes the reviewer's message with full section context
+        (baseline, benchmark, whole-policy text, regulations) and returns {reply, proposed_content}.
+        The turn is recorded in the unit's conversation_history; content changes are applied separately
+        via apply_section_content after the reviewer confirms a preview."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic, subtopic, unit = self._resolve_unit(draft, topic_id, subtopic_id)
+        if not unit:
+            return None
+        benchmark_topics = self._get_benchmark_topics(draft, vector_store)
+        benchmark_content, _ = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
+        regulation_chunks = await self._regulation_chunks_for_unit(draft, unit, vector_store)
+        whole_policy_text = self.generation_service._assemble_full_policy_text(draft)
+        history = "\n".join(
+            f"Reviewer: {h.user_message}\nAssistant: {h.ai_response}" for h in (unit.conversation_history or [])[-3:]
+        )
+        result = await self.generation_service.review_chat_turn(
+            topic_title=unit.topic, baseline_content=unit.baseline_content or "",
+            existing_content=unit.content or "", benchmark_content=benchmark_content,
+            whole_policy_text=whole_policy_text, user_message=message, conversation_history=history,
+            draft=draft, llm_service=llm_service, regulation_chunks=regulation_chunks,
+        )
+        from app.models.draft_models import ConversationEntry
+        unit.conversation_history.append(ConversationEntry(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            user_message=message, ai_response=result.get("reply", ""),
+        ))
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        result.update({"topic_id": topic_id, "subtopic_id": subtopic_id})
+        return result
 
     # ===== Version history & audit trail =====
 
