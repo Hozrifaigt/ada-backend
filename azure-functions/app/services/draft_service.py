@@ -2676,15 +2676,74 @@ class DraftService:
                 return topic, None, None
         return topic, subtopic, (subtopic or topic)
 
-    async def _regulation_chunks_for_unit(self, draft, unit, vector_store):
-        """Regulation RAG for a section (non-fatal on failure)."""
+    def add_uploaded_regulations(self, draft_id: str, files: List[tuple]) -> Optional[Dict[str, Any]]:
+        """Re-upload regulations on an existing review draft (Review tab → Regulations). Extracts text from
+        each .docx, APPENDS it to `uploaded_regulations_text` (so it joins what was uploaded at creation),
+        and stores the raw files in blob for parity. `files` = list of (filename, bytes).
+        Returns {has_regulations, added, message}."""
+        from io import BytesIO
+        from app.pipelines.document_processor import DocumentProcessor
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        processor = DocumentProcessor()
+        reg_texts, added = [], []
+        for filename, data in files or []:
+            if not (filename or "").endswith(".docx"):
+                continue
+            try:
+                reg_processed = processor.process(BytesIO(data))
+                reg_text = (reg_processed.get("full_text", "") or "").strip()
+                if reg_text:
+                    reg_texts.append(f"[{filename}]\n{reg_text}")
+                    added.append(filename)
+            except Exception as e:
+                logger.warning(f"Could not parse regulation file '{filename}': {e}")
+        existing = (draft.metadata.uploaded_regulations_text or "").strip()
+        if not reg_texts:
+            return {"has_regulations": bool(existing), "added": [],
+                    "message": "No readable .docx regulation text found"}
+        block = "\n\n---\n\n".join(reg_texts)
+        draft.metadata.uploaded_regulations_text = (existing + "\n\n---\n\n" + block) if existing else block
+        # Store the raw files alongside the others (non-fatal).
         try:
-            return await self.generation_service._search_relevant_regulations(
+            from azure.storage.blob import BlobServiceClient
+            blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
+            container = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
+            for filename, data in files or []:
+                if (filename or "").endswith(".docx"):
+                    container.upload_blob(name=f"uploaded-policies/{draft_id}/regulations/{filename}",
+                                          data=data, overwrite=True)
+        except Exception as e:
+            logger.warning(f"Could not upload regulation files to blob (non-fatal): {e}")
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return {"has_regulations": True, "added": added,
+                "message": f"Added {len(added)} regulation file(s)"}
+
+    async def _regulation_chunks_for_unit(self, draft, unit, vector_store):
+        """Regulation RAG for a section (non-fatal on failure). Two sources, merged:
+        1. the prebuilt library index (only when a `regulations` name is set), and
+        2. draft-scoped retrieval over the reviewer's UPLOADED regulation files — chunked + searched by the
+           section (title + full content) so the right articles surface instead of the whole document."""
+        chunks = []
+        try:
+            chunks += await self.generation_service._search_relevant_regulations(
                 topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
             )
         except Exception as e:
-            logger.warning(f"Regulation search failed for section '{getattr(unit, 'topic', '')}' (non-fatal): {e}")
-            return []
+            logger.warning(f"Library regulation search failed for section '{getattr(unit, 'topic', '')}' (non-fatal): {e}")
+        uploaded = getattr(draft.metadata, "uploaded_regulations_text", None)
+        if uploaded:
+            content = unit.content or unit.baseline_content or ""
+            query = f"{unit.topic}\n{content}".strip()
+            try:
+                chunks += await self.generation_service.search_uploaded_regulations(
+                    query_text=query, uploaded_text=uploaded, vector_store=vector_store, top_k=5,
+                )
+            except Exception as e:
+                logger.warning(f"Uploaded-regulation search failed for section '{getattr(unit, 'topic', '')}' (non-fatal): {e}")
+        return chunks
 
     async def assess_benchmark_for_unit(self, draft_id: str, topic_id: str, vector_store, llm_service,
                                         subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -2755,7 +2814,14 @@ class DraftService:
             topic_title=unit.topic, existing_content=unit.content or unit.baseline_content or "",
             draft=draft, llm_service=llm_service, regulation_chunks=regulation_chunks,
         )
-        result.update({"topic_id": topic_id, "subtopic_id": subtopic_id, "message": "Regulation check complete"})
+        # Tell the UI whether ANY regulation source exists, so "none loaded" reads differently from
+        # "checked, nothing applies".
+        has_regulations = bool(
+            (draft.metadata.regulations or "").strip()
+            or (getattr(draft.metadata, "uploaded_regulations_text", None) or "").strip()
+        )
+        result.update({"topic_id": topic_id, "subtopic_id": subtopic_id,
+                       "has_regulations": has_regulations, "message": "Regulation check complete"})
         return result
 
     async def apply_section_content(self, draft_id: str, topic_id: str, content: str,

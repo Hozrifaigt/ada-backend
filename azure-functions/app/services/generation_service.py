@@ -1,5 +1,8 @@
 import json
 import logging
+import math
+import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +16,20 @@ from app.models.regulation_models import RegulationChunk
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# Process-level cache of uploaded-regulation chunk embeddings, keyed by a hash of the chunk set, so the
+# per-section "Check regulations" step doesn't re-embed the same regulation text on every click. Bounded.
+_UPLOADED_REG_EMBED_CACHE: Dict[str, List[List[float]]] = {}
+_UPLOADED_REG_EMBED_CACHE_MAX = 8
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
 
 
 class ContentGenerationService:
@@ -831,14 +848,88 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
     # REVIEW PIPELINE (review_mode drafts — per-section benchmark → law → close)
     # ============================================================
 
+    def _chunk_regulation_text(self, text: str, target_chars: int = 1200, overlap_chars: int = 150) -> List[str]:
+        """Split a (potentially long) regulation document into retrievable passages. Splits on blank-line /
+        article boundaries, greedily packs paragraphs to ~target_chars, carries a small overlap for
+        continuity, and hard-splits any single oversized paragraph."""
+        text = (text or "").strip()
+        if not text:
+            return []
+        paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        chunks: List[str] = []
+        buf = ""
+        for p in paras:
+            if buf and len(buf) + len(p) + 2 > target_chars:
+                chunks.append(buf)
+                buf = (buf[-overlap_chars:] + "\n\n" + p) if overlap_chars else p
+            else:
+                buf = (buf + "\n\n" + p) if buf else p
+        if buf:
+            chunks.append(buf)
+        out: List[str] = []
+        for c in chunks:
+            if len(c) <= target_chars * 2:
+                out.append(c)
+            else:
+                for i in range(0, len(c), target_chars):
+                    out.append(c[i:i + target_chars])
+        return out
+
+    def _embed_reg_chunks(self, chunks: List[str], vector_store) -> List[List[float]]:
+        """Embed regulation chunks with a process-level cache (keyed by the chunk set) to avoid re-embedding
+        the same uploaded regulation on every per-section check."""
+        key = hashlib.md5("\n".join(chunks).encode("utf-8")).hexdigest()
+        cached = _UPLOADED_REG_EMBED_CACHE.get(key)
+        if cached is not None:
+            return cached
+        vecs = vector_store.embedder.embed_documents(chunks)
+        if len(_UPLOADED_REG_EMBED_CACHE) >= _UPLOADED_REG_EMBED_CACHE_MAX:
+            _UPLOADED_REG_EMBED_CACHE.pop(next(iter(_UPLOADED_REG_EMBED_CACHE)))
+        _UPLOADED_REG_EMBED_CACHE[key] = vecs
+        return vecs
+
+    async def search_uploaded_regulations(
+        self, query_text: str, uploaded_text: str, vector_store, top_k: int = 5, min_score: float = 0.0,
+    ) -> List[RegulationChunk]:
+        """Draft-scoped RAG over the reviewer's UPLOADED regulation text: chunk → embed (cached) → cosine
+        top-k against the section query. Returns only the most relevant passages as RegulationChunks, so the
+        prompt gets the right articles instead of the whole document dumped in. Non-fatal on any failure."""
+        if not (uploaded_text or "").strip() or vector_store is None:
+            return []
+        chunks = self._chunk_regulation_text(uploaded_text)
+        if not chunks:
+            return []
+        try:
+            vecs = self._embed_reg_chunks(chunks, vector_store)
+            # Cap the query length so an unusually long section can't exceed the embedding token limit.
+            qv = vector_store.embedder.embed_query((query_text or "")[:16000])
+        except Exception as e:
+            logger.warning(f"Uploaded-regulation embedding failed (non-fatal): {e}")
+            return []
+        scored = sorted(
+            ((_cosine(qv, v), i) for i, v in enumerate(vecs) if v),
+            key=lambda x: x[0], reverse=True,
+        )
+        out: List[RegulationChunk] = []
+        for rank, (score, i) in enumerate(scored[:top_k], 1):
+            if score < min_score:
+                continue
+            out.append(RegulationChunk(
+                id=f"uploaded-{i}",
+                content=chunks[i],
+                regulation_category="Uploaded",
+                decree_name="Uploaded Regulation",
+                article_number=f"Excerpt {rank}",
+                regulation_type="uploaded",
+                score=score,
+            ))
+        return out
+
     def _regulations_context(self, draft, regulation_chunks) -> str:
-        """Azure Search regulation chunks + the draft's uploaded regulation text, formatted for a prompt."""
-        regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
-        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
-        if uploaded_regs:
-            sep = "\n\n" if regulations_context else ""
-            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
-        return regulations_context
+        """Formatted regulation chunks for a prompt. Covers both the library index AND the draft's uploaded
+        regulation — the uploaded text is now RETRIEVED into the most-relevant chunks upstream
+        (search_uploaded_regulations) rather than dumped whole, so this no longer appends the full document."""
+        return self._format_regulations_for_prompt(regulation_chunks or [])
 
     async def generate_benchmark_as_is(
         self, topic_title: str, baseline_content: str, benchmark_content: Optional[str],

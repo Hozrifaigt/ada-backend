@@ -1607,6 +1607,29 @@ async def review_chat_endpoint(
     return result
 
 
+@router.post("/{draft_id}/regulations/upload")
+async def upload_regulations_endpoint(
+    draft_id: str,
+    regulations_files: List[UploadFile] = File(...),
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Re-upload regulations on an existing review draft (Review tab → Regulations). Appends the extracted
+    text to the draft's regulation set so the per-section regulation check can retrieve from it."""
+    files = []
+    for rf in regulations_files:
+        if not (rf.filename or "").endswith(".docx"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Only .docx regulation files are supported")
+        files.append((rf.filename, await rf.read()))
+    result = draft_service.add_uploaded_regulations(draft_id, files)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    draft_service.log_audit(draft_id, current_user.get('email', ''), "regulations_uploaded",
+                            summary=", ".join(result.get("added", [])) or "no readable text")
+    return result
+
+
 # Template endpoint removed - no longer using Excel templates
 
 @router.post("/test/regulations-retrieval")
