@@ -494,12 +494,9 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         # Format the full TOC for context
         full_toc = self._format_full_toc(draft.toc)
 
-        # Format regulations — include Azure Search results and uploaded regulation files
+        # Regulation context comes ONLY from retrieved chunks — the whole uploaded_regulations_text
+        # used to be appended here and overflowed the context window as files accumulated.
         regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
-        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
-        if uploaded_regs:
-            sep = "\n\n" if regulations_context else ""
-            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
 
         # Use prompt manager
         prompt = self.prompt_manager.get_prompt(
@@ -606,11 +603,9 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         if benchmark_only:
             regulations_context = ""
         else:
+            # Retrieved chunks only — callers pass uploaded-regulation passages via regulation_chunks
+            # (see _regulation_chunks_for_unit); the whole-text dump overflowed the context window.
             regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
-            uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
-            if uploaded_regs:
-                sep = "\n\n" if regulations_context else ""
-                regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
 
         prompt = self.prompt_manager.get_prompt(
             "gap_assessment",
@@ -680,11 +675,8 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         sequential_context = self._build_sequential_context(draft, topic_id, subtopic_id)
         full_toc = self._format_full_toc(draft.toc)
 
+        # Retrieved chunks only (uploaded-regulation passages arrive via regulation_chunks).
         regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
-        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
-        if uploaded_regs:
-            sep = "\n\n" if regulations_context else ""
-            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
 
         prompt = self.prompt_manager.get_prompt(
             "adapt_with_gap",
@@ -840,11 +832,8 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         regulation_chunks: List[RegulationChunk] = None,
     ) -> str:
         """Consolidate everything about a theme from across the whole policy into one section (Stage 2)."""
+        # Retrieved chunks only (uploaded-regulation passages arrive via regulation_chunks).
         regulations_context = self._format_regulations_for_prompt(regulation_chunks or [])
-        uploaded_regs = getattr(draft.metadata, "uploaded_regulations_text", None)
-        if uploaded_regs:
-            sep = "\n\n" if regulations_context else ""
-            regulations_context = regulations_context + sep + f"[Uploaded Regulations]\n{uploaded_regs}"
         prompt = self.prompt_manager.get_prompt(
             "consolidate_theme",
             topic_title=topic_title,
@@ -970,7 +959,7 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         """Law/regulation check of one section → {applies, extract, suggestion}."""
         regulations_context = self._regulations_context(draft, regulation_chunks)
         if not (regulations_context or "").strip():
-            return {"applies": False, "extract": "", "suggestion": ""}
+            return {"applies": False, "extract": "", "suggestion": "", "check_failed": False}
         prompt = self.prompt_manager.get_prompt(
             "review_regulation",
             topic_title=topic_title,
@@ -984,11 +973,14 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             data = self._parse_json_object(response)
         except Exception as e:
             logger.error(f"Failed to parse review_regulation JSON for '{topic_title}': {e}")
-            return {"applies": False, "extract": "", "suggestion": ""}
+            # A failed CHECK must not read as "no regulation applies" — that's a compliance
+            # false-negative. check_failed lets the UI say "try again" instead.
+            return {"applies": False, "extract": "", "suggestion": "", "check_failed": True}
         return {
             "applies": bool(data.get("applies", False)),
             "extract": str(data.get("extract", "")).strip(),
             "suggestion": str(data.get("suggestion", "")).strip(),
+            "check_failed": False,
         }
 
     async def redistribute_assignments(

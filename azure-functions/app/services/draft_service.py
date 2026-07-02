@@ -21,6 +21,12 @@ from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+# Process-level embedding cache. DraftService lives for ONE request, so its per-instance cache alone
+# re-embeds the same benchmark units on every "Run benchmark" click; this keeps them warm across
+# requests. Bounded FIFO — ~1k texts ≈ a few dozen MB worst case.
+_EMBED_CACHE: Dict[str, List[float]] = {}
+_EMBED_CACHE_MAX = 1024
+
 
 class DraftService:
     """Business logic service for draft management."""
@@ -349,10 +355,17 @@ class DraftService:
                     toc_items = await self.generation_service.extract_toc_from_content(excerpt, llm_service)
                     if toc_items:
                         rebuilt = processor.build_from_extracted_toc(toc_items)
-                        if rebuilt and rebuilt.get("topics"):  # guard: don't let a degenerate result wipe the TOC
+                        rebuilt_topics = (rebuilt or {}).get("topics") or []
+                        # Coverage guard: titles that couldn't be located in the body are silently
+                        # dropped (their text folds into the preceding section), so a low hit-rate
+                        # means mis-mapped content — keep the deterministic structure instead.
+                        if rebuilt_topics and len(rebuilt_topics) >= max(1, int(0.7 * len(toc_items))):
                             processed = rebuilt
-                            topics = rebuilt.get("topics", [])
+                            topics = rebuilt_topics
                             logger.info(f"LLM TOC extraction applied (was {conf}): {len(topics)} topics")
+                        elif rebuilt_topics:
+                            logger.warning(f"LLM TOC extraction located only {len(rebuilt_topics)}/{len(toc_items)} "
+                                           f"sections; keeping deterministic structure")
                         else:
                             logger.warning("LLM TOC extraction produced no topics; keeping deterministic")
                     else:
@@ -498,11 +511,16 @@ class DraftService:
             success = self.storage.create_draft(draft_to_save)
 
             if success:
-                # Snapshot the original as version 0 — powers safe restore + "% preserved" in the gap summary.
-                try:
-                    self.storage.create_version(draft_id, draft_to_save, label="original", created_by=user_id)
-                except Exception as e:
-                    logger.warning(f"Could not snapshot original version (non-fatal): {e}")
+                # Snapshot the original as version 0 — the source of truth for content redistribution
+                # and "% preserved". create_version swallows its own errors and returns None, so check
+                # the id and retry once; a missing original makes redistribution silently fall back to
+                # the live (possibly edited) draft later.
+                vid = self.storage.create_version(draft_id, draft_to_save, label="original", created_by=user_id)
+                if not vid:
+                    vid = self.storage.create_version(draft_id, draft_to_save, label="original", created_by=user_id)
+                if not vid:
+                    logger.error(f"Could not snapshot the ORIGINAL version for draft {draft_id} — "
+                                 f"content redistribution will fall back to the live draft")
                 logger.info(f"Initialized draft {draft_id} from upload with {len(draft_to_save.toc)} topics")
                 return {
                     "draft_id": draft_to_save.id,
@@ -645,14 +663,16 @@ class DraftService:
         return transformed_toc
 
     def _naive_benchmark_union(self, client_toc: List, benchmark_topics: List[Dict[str, Any]]) -> List:
-        """Fallback TOC: keep the client topics and append benchmark topics with no exact-name match."""
+        """Fallback TOC: keep the client topics and append benchmark topics with no normalized-name match."""
         from app.models.draft_models import TOCTopic
         toc = list(client_toc)
-        client_titles = {(t.topic or "").strip().lower() for t in toc}
+        client_titles = {self._norm_title(t.topic) for t in toc}
         next_order = len(toc)
         for bt in benchmark_topics:
             bt_name = (bt.get("topic") or bt.get("name") or "").strip()
-            if bt_name and bt_name.lower() not in client_titles:
+            bt_key = self._norm_title(bt_name)
+            if bt_name and bt_key and bt_key not in client_titles:
+                client_titles.add(bt_key)  # also prevents two same-named benchmark topics duplicating
                 next_order += 1
                 new_topic = TOCTopic(
                     topic_id=str(uuid.uuid4()),
@@ -781,6 +801,7 @@ class DraftService:
         final_toc: List = []
         used_client = set()
         run_claims: Dict[str, Any] = {}  # benchmark key -> client topic the LLM mapped to it THIS run
+        added_titles: set = set()        # normalized titles already added from the benchmark (dup guard)
         for entry in data.get("final_toc", []):
             title = (entry.get("title") or "").strip()
             if not title:
@@ -821,6 +842,17 @@ class DraftService:
                 if bm_key not in bench_titles and title_key not in bench_titles and title_key not in client_by_title:
                     logger.warning(f"Dropping reconciled TOC entry '{title}' — not found in client or benchmark TOC")
                     continue
+                # Duplicate guards: never create an added twin of a client section that will be in the
+                # final TOC (reused above or re-added by the preserve-mode safety loop), and never add
+                # the same benchmark title twice.
+                existing_same = client_by_title.get(title_key)
+                if existing_same is not None and (review_intensity != "rebuild" or existing_same.topic_id in used_client):
+                    logger.info(f"Skipping added TOC entry '{title}' — duplicates an existing client section")
+                    continue
+                if title_key in added_titles:
+                    logger.info(f"Skipping added TOC entry '{title}' — already added from the benchmark")
+                    continue
+                added_titles.add(title_key)
                 new_topic = TOCTopic(
                     topic_id=str(uuid.uuid4()),
                     topic=title,
@@ -1319,6 +1351,8 @@ class DraftService:
                         review_step=existing_subtopic.review_step if existing_subtopic else "pending",
                         benchmark_match=existing_subtopic.benchmark_match if existing_subtopic else None,
                         added_from_benchmark=existing_subtopic.added_from_benchmark if existing_subtopic else False,
+                        manual_benchmark_content=existing_subtopic.manual_benchmark_content if existing_subtopic else None,
+                        manual_benchmark_match=existing_subtopic.manual_benchmark_match if existing_subtopic else None,
                     )
                     subtopics.append(subtopic)
 
@@ -1339,6 +1373,8 @@ class DraftService:
                     added_from_benchmark=existing_topic.added_from_benchmark if existing_topic else False,
                     benchmark_match=existing_topic.benchmark_match if existing_topic else None,
                     reconcile_note=existing_topic.reconcile_note if existing_topic else None,
+                    manual_benchmark_content=existing_topic.manual_benchmark_content if existing_topic else None,
+                    manual_benchmark_match=existing_topic.manual_benchmark_match if existing_topic else None,
                 )
                 toc_topics.append(topic)
 
@@ -1928,15 +1964,22 @@ class DraftService:
         return "\n\n".join(parts).strip()
 
     def _embed(self, text: str, vector_store) -> Optional[List[float]]:
-        """Embed text with a per-instance cache so identical strings aren't re-embedded."""
+        """Embed text, cached per-instance AND process-wide (module FIFO) so identical strings —
+        especially the benchmark units re-scored on every per-section run — aren't re-embedded."""
         key = (text or "").strip()
         if not key or not vector_store:
             return None
         cached = self._embed_cache.get(key)
+        if cached is None:
+            cached = _EMBED_CACHE.get(key)
         if cached is not None:
+            self._embed_cache[key] = cached
             return cached
         vec = vector_store.embedder.embed_query(key)
         self._embed_cache[key] = vec
+        if len(_EMBED_CACHE) >= _EMBED_CACHE_MAX:
+            _EMBED_CACHE.pop(next(iter(_EMBED_CACHE)))
+        _EMBED_CACHE[key] = vec
         return vec
 
     def _candidate_vector(self, bt: Dict[str, Any], vector_store) -> Optional[List[float]]:
@@ -2014,11 +2057,13 @@ class DraftService:
         for bt in benchmark_topics or []:
             name = (bt.get("topic") or bt.get("name") or "").strip()
             if name:
-                out.append({"name": name, "content": (bt.get("topic_content") or bt.get("content") or "").strip()})
+                out.append({"name": name, "content": (bt.get("topic_content") or bt.get("content") or "").strip(),
+                            "parent": None})
             for s in self._benchmark_subtopics(bt):
                 sname = (s.get("name") or s.get("topic") or "").strip()
                 if sname:
-                    out.append({"name": sname, "content": (s.get("content") or s.get("topic_content") or "").strip()})
+                    out.append({"name": sname, "content": (s.get("content") or s.get("topic_content") or "").strip(),
+                                "parent": name or None})
         return out
 
     def _best_benchmark_unit(self, query_title, query_content, benchmark_topics, vector_store, threshold: float = 0.78):
@@ -2039,41 +2084,69 @@ class DraftService:
         if not vector_store:
             return None, None
         q = self._embed(f"{query_title} {(query_content or '')[:800]}".strip(), vector_store)
-        qt = self._embed((query_title or "").strip(), vector_store)
-        if q is None and qt is None:
-            return None, None
         best, best_score = None, 0.0
-        best_t, best_t_score = None, 0.0
-        for u in units:
-            if q is not None:
+        if q is not None:
+            for u in units:
                 cand = self._embed(f"{u['name']} {(u['content'] or '')[:800]}".strip(), vector_store)
-                if cand is not None:
-                    sc = self._cosine(q, cand)
-                    if sc > best_score:
-                        best, best_score = u, sc
-            if qt is not None:
-                tcand = self._embed(u["name"], vector_store)
-                if tcand is not None:
-                    tsc = self._cosine(qt, tcand)
-                    if tsc > best_t_score:
-                        best_t, best_t_score = u, tsc
+                if cand is None:
+                    continue
+                sc = self._cosine(q, cand)
+                if sc > best_score:
+                    best, best_score = u, sc
         if best is not None and best_score >= threshold:
             return (best["content"] or None), best["name"]
+        # Lazy fallback pass — only pay for title-only embeddings when the combined pass failed.
         TITLE_ONLY_THRESHOLD = 0.86
+        qt = self._embed((query_title or "").strip(), vector_store)
+        if qt is None:
+            return None, None
+        best_t, best_t_score = None, 0.0
+        for u in units:
+            tcand = self._embed(u["name"], vector_store)
+            if tcand is None:
+                continue
+            tsc = self._cosine(qt, tcand)
+            if tsc > best_t_score:
+                best_t, best_t_score = u, tsc
         if best_t is not None and best_t_score >= TITLE_ONLY_THRESHOLD:
             return (best_t["content"] or None), best_t["name"]
         return None, None
 
+    @staticmethod
+    def _pin_name(pinned: Optional[str]) -> str:
+        """The display name of a pin: pins may be qualified as 'parent|name' to disambiguate
+        duplicate subtopic titles (e.g. 'Scope' under several topics)."""
+        p = (pinned or "").strip()
+        return p.split("|", 1)[1] if "|" in p else p
+
     def _resolve_benchmark_unit_by_name(self, name: Optional[str], benchmark_topics) -> tuple:
         """Find a benchmark unit (topic or subtopic) by NORMALIZED title — used to honor a pinned or
-        persisted benchmark_match without any similarity search. Returns (content, real_name) or (None, None)."""
-        key = self._norm_title(name)
-        if not key:
+        persisted benchmark_match without any similarity search. Accepts a qualified 'parent|name' pin
+        (tried with its parent first, then name-only if the parent was renamed/removed).
+        Returns (content, real_name) or (None, None)."""
+        raw = (name or "").strip()
+        if not raw:
             return None, None
-        for u in self._flatten_benchmark_units(benchmark_topics):
-            if self._norm_title(u["name"]) == key:
+        units = self._flatten_benchmark_units(benchmark_topics)
+
+        def find(nkey, pkey=None):
+            for u in units:
+                if self._norm_title(u["name"]) != nkey:
+                    continue
+                if pkey is not None and self._norm_title(u.get("parent") or "") != pkey:
+                    continue
                 return (u["content"] or None), u["name"]
-        return None, None
+            return None, None
+
+        if "|" in raw:
+            parent_raw, name_raw = raw.split("|", 1)
+            content, rname = find(self._norm_title(name_raw), self._norm_title(parent_raw))
+            if rname:
+                return content, rname
+            content, rname = find(self._norm_title(name_raw))
+            if rname:
+                return content, rname
+        return find(self._norm_title(raw))
 
     def _benchmark_content_for_unit(self, topic, subtopic, benchmark_topics, vector_store):
         """Return (benchmark_content, benchmark_name) for a gap unit. Resolution order:
@@ -2236,7 +2309,7 @@ class DraftService:
             return {"content": manual, "name": "Manual benchmark", "source": "manual"}
         benchmark_topics = self._get_benchmark_topics(draft, vector_store)
         content, name = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
-        pinned = (getattr(unit, "manual_benchmark_match", None) or "").strip()
+        pinned = self._pin_name(getattr(unit, "manual_benchmark_match", None))
         source = "none" if not name else ("pinned" if pinned and self._norm_title(pinned) == self._norm_title(name) else "matched")
         return {"content": content or "", "name": name, "source": source}
 
@@ -2299,13 +2372,9 @@ class DraftService:
                 topic, subtopic, benchmark_topics, vector_store
             )
 
-            regulation_chunks = []
-            try:
-                regulation_chunks = await self.generation_service._search_relevant_regulations(
-                    topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
-                )
-            except Exception as e:
-                logger.warning(f"Regulation search failed for gap report (non-fatal): {e}")
+            # Library index + retrieval over the UPLOADED regulation files (replaces the old
+            # whole-uploaded-text prompt dump, which overflowed the context window).
+            regulation_chunks = await self._regulation_chunks_for_unit(draft, unit, vector_store)
 
             previous_excerpt = (getattr(draft.metadata, "previous_policy_text", None) or "")[:4000]
 
@@ -2366,13 +2435,8 @@ class DraftService:
             for topic, sub in targets:
                 unit = sub or topic
                 benchmark_content, benchmark_name = self._benchmark_content_for_unit(topic, sub, benchmark_topics, vector_store)
-                regulation_chunks = []
-                try:
-                    regulation_chunks = await self.generation_service._search_relevant_regulations(
-                        topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
-                    )
-                except Exception as e:
-                    logger.warning(f"Regulation search failed in batch (non-fatal): {e}")
+                # Library index + retrieval over the UPLOADED regulation files (no whole-text dump).
+                regulation_chunks = await self._regulation_chunks_for_unit(draft, unit, vector_store)
                 prepared.append((topic, sub, benchmark_content, benchmark_name, regulation_chunks,
                                  self._surrounding_context_for_unit(topic, sub, draft)))
 
@@ -2472,18 +2536,20 @@ class DraftService:
                 if fid in request.confirmed_finding_ids and not any(c.get("id") == fid for c in confirmed):
                     confirmed.append(f)
 
+            # Finding ids are regenerated on every assess. If the reviewer's ticked ids no longer
+            # exist in the stored report, "applying" would silently change nothing — fail loudly.
+            if request.confirmed_finding_ids and not confirmed:
+                raise ValueError("The gap findings changed since they were selected — "
+                                 "re-run the benchmark assessment and tick the findings again")
+
             benchmark_topics = self._get_benchmark_topics(draft, vector_store)
             benchmark_content, _ = self._benchmark_content_for_unit(
                 topic, subtopic, benchmark_topics, vector_store
             )
 
-            regulation_chunks = []
-            try:
-                regulation_chunks = await self.generation_service._search_relevant_regulations(
-                    topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
-                )
-            except Exception as e:
-                logger.warning(f"Regulation search failed for apply-gap (non-fatal): {e}")
+            # Library index + retrieval over the UPLOADED regulation files (replaces the old
+            # whole-uploaded-text prompt dump, which overflowed the context window on "Fix gaps").
+            regulation_chunks = await self._regulation_chunks_for_unit(draft, unit, vector_store)
 
             # Benchmark-only topic with no baseline → seed from the benchmark reference
             existing = unit.content or ""
@@ -2523,6 +2589,8 @@ class DraftService:
             self.storage.update_draft(draft_id, draft)
 
             return {"content": new_content, "summary": summary, "word_count": word_count, "message": "Gap changes applied"}
+        except ValueError:
+            raise  # stale-findings guard — surfaced to the caller as a 409
         except Exception as e:
             logger.error(f"Failed to apply gap for topic {topic_id}: {e}")
             import traceback
@@ -2547,18 +2615,22 @@ class DraftService:
         return out
 
     def apply_toc_structure(self, draft_id: str, new_toc: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Replace the working/good TOC with a provided structure ([{title, subtopics:[...]}]), preserving
-        the client's existing content by case-insensitive title match (the 'redistribute into the new
-        format' ask). Unmatched new sections start empty/pending. Returns the updated draft dict."""
+        """Replace the working/good TOC with a provided structure ([{id?, title, subtopics:[...]}]),
+        preserving the client's existing content by stable ID first (survives renames), falling back to
+        case-insensitive title match (older/id-less callers). Unmatched new sections start empty/pending.
+        Returns the updated draft dict."""
         from app.models.draft_models import TOCTopic, TOCSubtopic
         draft = self.storage.get_draft(draft_id)
         if not draft:
             return None
-        # Index existing content by normalized title (topic and subtopic level).
+        # Index existing content by stable id AND by normalized title (topic and subtopic level).
+        topics_by_id = {t.topic_id: t for t in draft.toc}
         existing_topics = {(t.topic or "").strip().lower(): t for t in draft.toc}
+        subs_by_id = {}
         existing_subs = {}
         for t in draft.toc:
             for s in t.subtopics:
+                subs_by_id[s.subtopic_id] = s
                 existing_subs[(s.topic or "").strip().lower()] = s
 
         new_models: List[TOCTopic] = []
@@ -2566,14 +2638,16 @@ class DraftService:
             title = (entry.get("title") or entry.get("topic") or "").strip()
             if not title:
                 continue
-            match = existing_topics.get(title.lower())
+            entry_id = (entry.get("id") or entry.get("topic_id") or "").strip()
+            match = topics_by_id.get(entry_id) or existing_topics.get(title.lower())
             subs_in = entry.get("subtopics") or []
             sub_models = []
             for j, su in enumerate(subs_in, 1):
                 s_title = (su if isinstance(su, str) else (su.get("title") or su.get("topic") or "")).strip()
                 if not s_title:
                     continue
-                smatch = existing_subs.get(s_title.lower())
+                s_id = ("" if isinstance(su, str) else (su.get("id") or su.get("subtopic_id") or "")).strip()
+                smatch = subs_by_id.get(s_id) or existing_subs.get(s_title.lower())
                 sub_models.append(TOCSubtopic(
                     subtopic_id=(smatch.subtopic_id if smatch else str(uuid.uuid4())),
                     topic=s_title, order=j,
@@ -2585,6 +2659,8 @@ class DraftService:
                     review_step=(smatch.review_step if smatch else "pending"),
                     benchmark_match=(smatch.benchmark_match if smatch else None),
                     added_from_benchmark=(smatch.added_from_benchmark if smatch else False),
+                    manual_benchmark_content=(smatch.manual_benchmark_content if smatch else None),
+                    manual_benchmark_match=(smatch.manual_benchmark_match if smatch else None),
                 ))
             new_models.append(TOCTopic(
                 topic_id=(match.topic_id if match else str(uuid.uuid4())),
@@ -2598,6 +2674,8 @@ class DraftService:
                 review_step=(match.review_step if match else "pending"),
                 added_from_benchmark=(match.added_from_benchmark if match else False),
                 benchmark_match=(match.benchmark_match if match else None),
+                manual_benchmark_content=(match.manual_benchmark_content if match else None),
+                manual_benchmark_match=(match.manual_benchmark_match if match else None),
             ))
         if not new_models:
             return None
@@ -2676,6 +2754,10 @@ class DraftService:
                     conversation_history=(ws.conversation_history if ws else []),
                     baseline_content=(ws.baseline_content if ws else ""),
                     review_step=(ws.review_step if ws else "pending"),
+                    gap_report_json=(ws.gap_report_json if ws else None),
+                    gap_status=(ws.gap_status if ws else "pending"),
+                    manual_benchmark_content=(ws.manual_benchmark_content if ws else None),
+                    manual_benchmark_match=(ws.manual_benchmark_match if ws else None),
                 ))
             out.append(TOCTopic(
                 topic_id=(w.topic_id if w else str(uuid.uuid4())), topic=title, order=i,
@@ -2684,6 +2766,10 @@ class DraftService:
                 baseline_content=(w.baseline_content if w else ""),
                 review_step=(w.review_step if w else "pending"),
                 benchmark_match=(w.benchmark_match if w else None),
+                gap_report_json=(w.gap_report_json if w else None),
+                gap_status=(w.gap_status if w else "pending"),
+                manual_benchmark_content=(w.manual_benchmark_content if w else None),
+                manual_benchmark_match=(w.manual_benchmark_match if w else None),
             ))
         return out
 
@@ -2732,10 +2818,13 @@ class DraftService:
 
     def approve_toc(self, draft_id: str, actor: str = "") -> Optional[Dict[str, Any]]:
         """Lock the working/good TOC as the agreed structure (the explicit gate before content work).
-        Snapshots a version so the approved TOC is restorable (Stage 1d)."""
+        Snapshots a version so the approved TOC is restorable (Stage 1d).
+        Raises ValueError when the map-first gate isn't satisfied (was UI-only before)."""
         draft = self.storage.get_draft(draft_id)
         if not draft:
             return None
+        if not getattr(draft.metadata, "content_mapped", False):
+            raise ValueError("Map the client content into the sections before approving the TOC")
         draft.metadata.toc_approved = True
         draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
         self.storage.update_draft(draft_id, draft)
@@ -2764,13 +2853,8 @@ class DraftService:
         benchmark_topics = self._get_benchmark_topics(draft, vector_store)
         benchmark_content, _ = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
         whole_policy_text = self.generation_service._assemble_full_policy_text(draft)
-        regulation_chunks = []
-        try:
-            regulation_chunks = await self.generation_service._search_relevant_regulations(
-                topic_title=unit.topic, user_prompt="", draft_metadata=draft.metadata, vector_store=vector_store
-            )
-        except Exception as e:
-            logger.warning(f"Regulation search failed for consolidate (non-fatal): {e}")
+        # Library index + retrieval over the UPLOADED regulation files (no whole-text dump).
+        regulation_chunks = await self._regulation_chunks_for_unit(draft, unit, vector_store)
 
         content = await self.generation_service.consolidate_theme_content(
             topic_title=unit.topic, existing_content=unit.content or "",
@@ -2789,9 +2873,15 @@ class DraftService:
         draft = self.storage.get_draft(draft_id)
         if not draft:
             return None
-        # Source of truth for the client's original text = the 'original' version snapshot (falls back to
-        # the current draft if no snapshot exists).
-        original = self.storage.get_original_version(draft_id) or draft
+        # Source of truth for the client's original text = the 'original' version snapshot. The fallback
+        # to the CURRENT draft is a degraded mode (it may already contain reviewer edits) — flag it to the
+        # UI instead of failing silently.
+        original = self.storage.get_original_version(draft_id)
+        original_missing = original is None
+        if original_missing:
+            logger.error(f"No 'original' snapshot for draft {draft_id} — redistribution sources fall back "
+                         f"to the LIVE draft, which may include reviewer edits")
+            original = draft
 
         # Source units = every original topic/subtopic that actually has content (tagged with its level).
         sources: List[Dict[str, Any]] = []
@@ -2823,7 +2913,7 @@ class DraftService:
         ]
 
         if not sources or not good:
-            return {"sources": [], "targets": targets_out, "assignments": {}}
+            return {"sources": [], "targets": targets_out, "assignments": {}, "original_missing": original_missing}
 
         # Cache: the embeddings + LLM call are the only expensive parts. When the Good TOC and the original
         # content are unchanged since last time, reuse the cached assignment and just re-compose (cheap).
@@ -2844,7 +2934,8 @@ class DraftService:
             sources_out.append({"id": si, "title": src["title"], "content": src["content"], "level": src["level"]})
             assignments_out[str(si)] = key
 
-        return {"sources": sources_out, "targets": targets_out, "assignments": assignments_out}
+        return {"sources": sources_out, "targets": targets_out, "assignments": assignments_out,
+                "original_missing": original_missing}
 
     @staticmethod
     def _redistribution_signature(good: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> str:
@@ -3007,12 +3098,25 @@ class DraftService:
                 current_topic = topic
             else:  # subtopic — attach to the most recent topic
                 if current_topic is None:
-                    # Orphan subtopic (no preceding topic) → promote to a topic so its content isn't lost.
+                    # Orphan subtopic (no preceding topic) → promote to a topic so its content isn't
+                    # lost. Carry its review metadata too (gap report, conversation, step, matches) —
+                    # promotion used to rebuild the unit bare and silently drop all of it.
                     order_t += 1
+                    exs = ex_subs.get(sid)
                     current_topic = TOCTopic(
                         topic_id=str(uuid.uuid4()), topic=title, order=order_t,
-                        content=(content if include else ""), summary="", conversation_history=[],
-                        subtopics=[], baseline_content=(content if include else ""), review_step="pending",
+                        content=(content if include else (exs.content if exs else "")),
+                        summary=(exs.summary if exs else ""),
+                        conversation_history=(exs.conversation_history if exs else []),
+                        subtopics=[],
+                        baseline_content=(content if include else (exs.baseline_content if exs else "")),
+                        review_step=(exs.review_step if exs else "pending"),
+                        gap_report_json=(exs.gap_report_json if exs else None),
+                        gap_status=(exs.gap_status if exs else "pending"),
+                        benchmark_match=(exs.benchmark_match if exs else None),
+                        added_from_benchmark=(exs.added_from_benchmark if exs else False),
+                        manual_benchmark_content=(exs.manual_benchmark_content if exs else None),
+                        manual_benchmark_match=(exs.manual_benchmark_match if exs else None),
                     )
                     new_toc.append(current_topic)
                     continue
@@ -3174,7 +3278,7 @@ class DraftService:
             unit.benchmark_match = benchmark_name
         self.storage.update_draft(draft_id, draft)
 
-        pinned = (getattr(unit, "manual_benchmark_match", None) or "").strip()
+        pinned = self._pin_name(getattr(unit, "manual_benchmark_match", None))
         benchmark_source = (
             "manual" if benchmark_name == "Manual benchmark"
             else "none" if not benchmark_name
@@ -3387,12 +3491,24 @@ class DraftService:
             seen_desc.append(norm)
             return False
 
+        def _unit_status(u) -> str:
+            """Effective status for the rollup. The review pipeline advances review_step
+            (benchmark→regulation→review→closed) WITHOUT touching the legacy gap_status, so a fully
+            reviewed draft used to report everything as pending/assessed. A section whose content
+            was applied/banked counts as 'applied'; one that was only assessed counts as 'assessed'."""
+            step = (getattr(u, "review_step", None) or "pending")
+            if u.gap_status == "applied" or step in ("regulation", "review", "closed"):
+                return "applied"
+            if u.gap_status == "assessed" or step == "benchmark":
+                return "assessed"
+            return "pending"
+
         # Flatten units (topic + subtopics).
         units = []
         for t in draft.toc:
-            units.append((t.topic, t.topic_id, t.content or "", t.gap_status, getattr(t, "benchmark_match", None), t.gap_report_json))
+            units.append((t.topic, t.topic_id, t.content or "", _unit_status(t), getattr(t, "benchmark_match", None), t.gap_report_json))
             for s in t.subtopics:
-                units.append((f"{t.topic} › {s.topic}", s.subtopic_id, s.content or "", s.gap_status,
+                units.append((f"{t.topic} › {s.topic}", s.subtopic_id, s.content or "", _unit_status(s),
                               getattr(s, "benchmark_match", None), s.gap_report_json))
 
         topics_out = []

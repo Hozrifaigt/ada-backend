@@ -179,6 +179,8 @@ class PDFExportService:
     def _add_content(self, story: List, draft_data: Dict[str, Any], styles):
         """Add the actual content sections."""
         toc = draft_data.get('toc', [])
+        # Review exports are client deliverables: empty sections print as heading only.
+        review_mode = bool((draft_data.get('metadata') or {}).get('review_mode'))
 
         for topic_index, topic in enumerate(toc):
             # Add topic heading
@@ -193,7 +195,7 @@ class PDFExportService:
                     if paragraph.strip():
                         story.append(Paragraph(paragraph.strip(), styles['Normal']))
                         story.append(Spacer(1, 6))
-            else:
+            elif not review_mode:
                 story.append(Paragraph("<i>[No content generated yet]</i>", styles['Normal']))
                 story.append(Spacer(1, 10))
 
@@ -210,7 +212,7 @@ class PDFExportService:
                         if paragraph.strip():
                             story.append(Paragraph(paragraph.strip(), styles['Normal']))
                             story.append(Spacer(1, 6))
-                else:
+                elif not review_mode:
                     story.append(Paragraph("<i>[No content generated yet]</i>", styles['Normal']))
                     story.append(Spacer(1, 10))
 

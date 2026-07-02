@@ -540,13 +540,19 @@ class DraftStorageService:
             return None
 
     def restore_version(self, draft_id: str, version_id: str, restored_by: str = "") -> Optional[CompleteDraft]:
-        """Snapshot the current draft, then overwrite it with the chosen version."""
+        """Snapshot the current draft, then overwrite it with the chosen version.
+        The restore is ABORTED when the pre-restore snapshot can't be written — otherwise a transient
+        Table failure would destroy the current state with no recovery point."""
         snapshot = self.get_version(draft_id, version_id)
         if not snapshot:
             return None
         current = self.get_draft(draft_id)
         if current:
-            self.create_version(draft_id, current, label='auto: before restore', created_by=restored_by)
+            backup_id = self.create_version(draft_id, current, label='auto: before restore', created_by=restored_by)
+            if not backup_id:
+                logger.error(f"Aborting restore of {version_id} for draft {draft_id}: "
+                             f"pre-restore backup snapshot failed")
+                return None
         snapshot.id = draft_id
         snapshot.metadata.modified_at = datetime.now(timezone.utc).isoformat()
         if self.update_draft(draft_id, snapshot):
@@ -579,7 +585,9 @@ class DraftStorageService:
             self.table_client.create_entity(entity=entity)
             return True
         except Exception as e:
-            logger.warning(f"Audit append failed for draft {draft_id} (non-fatal): {e}")
+            # ERROR, not warning: a gap in the audit trail matters for a compliance product, and the
+            # callers all discard the return value — the log line is the only signal.
+            logger.error(f"AUDIT WRITE FAILED for draft {draft_id} (action='{action}', actor='{actor}'): {e}")
             return False
 
     def list_audit(self, draft_id: str, limit: int = 200) -> List[Dict[str, Any]]:

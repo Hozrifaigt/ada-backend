@@ -1,3 +1,48 @@
+# Pre-production fixes — audit round 2 MEDIUM issues (2026-07-02)
+1. **Stale finding ids fail loudly:** `apply_gap_for_topic` raises ValueError when confirmed ids match
+   nothing in the stored report (ids regenerate every assess); endpoint → 409; ReviewPipelinePanel
+   `tweakSelected` surfaces `response.data.detail`.
+2. **Orphan promotion keeps review state:** `commit_final_structure` promoted-subtopic branch now copies
+   content/summary/conversation/gap/step/matches/manual fields from `ex_subs` instead of rebuilding bare.
+3. **Regulation check failure ≠ "none apply":** `review_regulation_check` returns `check_failed` on JSON
+   parse failure; ReviewPipelinePanel shows an amber "check didn't complete — re-check" state instead of
+   the false-negative "no applicable regulation found".
+4. **Export placeholder:** review-mode exports never print "*[No content generated yet]*" — empty closed
+   sections emit heading only (both Word + PDF builders).
+5. **Filtered-export numbering:** `_filter_review_draft` renumbers survivors sequentially (topics 1..n,
+   subtopics 1..m; subs deep-copied before mutation).
+6. **Audit:** append failures now logged at ERROR with action/actor (callers discard the bool; the log is
+   the only signal). Known accepted limitation: list_audit scans the partition and caps at 200.
+7. **TOC-extraction coverage guard:** the LLM printed-TOC rebuild is only adopted when ≥70% of extracted
+   titles were located in the body; otherwise the deterministic structure is kept (mis-located titles
+   silently folded their content into the preceding section).
+UNTESTED here (no build/test in this env).
+
+# Pre-production fixes — audit round 2 HIGH issues (2026-07-02)
+Scope per client: .docx-only uploads everywhere (NO PDF/OCR), plus highs #2-#6. PDF *export* of review
+drafts still skips `_filter_review_draft` (user chose to deprioritize; one-line fix if needed later).
+1. **.docx-only uploads:** `_require_docx` helper in drafts.py applied to ALL uploads — initialize-from-
+   upload now validates previous_policy/benchmark/regulations files too (was policy only), extract-from-
+   file + regulations/upload share the helper (case-insensitive). NewDraftPage regulations input got
+   accept=".docx" + extension check (was unvalidated).
+2. **Word export leak:** `_filter_review_draft` blanks a NON-closed parent's content/summary when it's
+   kept only because a subtopic is closed (heading-only).
+3. **Manual benchmark fields preserved:** `manual_benchmark_content`/`manual_benchmark_match` now carried
+   in `update_toc`, `apply_toc_structure`, `_client_topics_from_snapshot` (which also now carries
+   gap_report_json/gap_status). TOC edits no longer wipe pins/pasted benchmark text.
+4. **No more whole-regulations prompt dumps:** the four `uploaded_regulations_text` appends in
+   generation_service (apply_gap_to_content, consolidate_theme_content, generate_gap_report,
+   _adapt_existing_content) are gone; callers (`apply_gap_for_topic`, `assess_batch`,
+   `generate_gap_report_for_topic`, `consolidate_theme_for_topic`) now use `_regulation_chunks_for_unit`
+   (library index + retrieval over uploaded text).
+5. **Gap summary:** `build_gap_summary` derives per-unit status via `_unit_status` (review_step
+   regulation/review/closed → applied; benchmark → assessed; else legacy gap_status) so completed review
+   drafts no longer roll up as pending.
+6. **Version safety:** original snapshot at upload checks create_version's return + retries once + ERROR
+   log; `restore_version` ABORTS when the pre-restore backup fails; `propose_redistribution` returns
+   `original_missing` and RedistributeButton shows a warning Alert when mapping from the live draft.
+UNTESTED here (no build/test in this env).
+
 # Good-TOC de-duplication: A (content-grounded LLM hints) + C (semantic dedup guardrail)
 
 ## Problem
@@ -33,6 +78,42 @@ Both reuse the existing embedding helpers (`_embed`, `_cosine`, `_benchmark_topi
       - compute client + benchmark embeddings; build `similarity_hints`; pass to `reconcile_toc` (A);
       - after the safety loop, run the dedup guardrail merging added->client topics (C).
 - [x] upload call site (initialize_draft_from_upload): pass `vector_store=vector_store`.
+
+## Pre-production fixes — 5 MEDIUM issues (2026-07-02)
+4. **Empty-content rule no longer step-gated:** ReviewPipelinePanel `workingContentOf` blanks whenever
+   content merely mirrors the baseline and the section isn't closed (running a benchmark advances the
+   step without producing text); closed sections always show their real content (that's what exports).
+5. **Embedding cost:** module-level `_EMBED_CACHE` (FIFO, 1024) in draft_service so benchmark units stay
+   warm across requests (DraftService is per-request); `_best_benchmark_unit` title-only pass is now
+   LAZY (only runs when the combined title+content pass fails the 0.78 threshold).
+6. **Reconcile duplicate guards:** the added-entry branch skips a title that duplicates a client section
+   that will be present (reused or preserve-mode safety loop; in rebuild mode only if actually reused)
+   and skips a benchmark title already added this run (`added_titles`). `_naive_benchmark_union` now
+   dedups by `_norm_title` (and won't add the same benchmark title twice).
+7. **Approve gate server-side:** `approve_toc` raises ValueError when `content_mapped` is False; the
+   endpoint returns 409 with the message (UI gate unchanged, API can no longer bypass map-first).
+8. **Export-vs-display honesty:** CURRENT CONTENT empty-state now says the client baseline is kept for
+   export until changes are applied/saved.
+UNTESTED here (no build/test in this env).
+
+## Pre-production fixes — 3 HIGH issues (2026-07-02)
+1. **Rename no longer wipes content:** `apply_toc_structure` now matches existing topics/subtopics by
+   STABLE ID first (entry `id`/`topic_id`, subtopic `id`/`subtopic_id`), title fallback for id-less
+   callers (extract/paste previews, /toc/use). Frontend `toStructureItems` (TocComparePanel) sends ids;
+   `TocStructureItem` type extended ({id?, title, subtopics:(string|{id?,title})[]}); preview render
+   handles both shapes. Synthetic ids (client/benchmark columns, new_… sections) miss the id map and
+   fall back to title — unchanged behavior. NOTE: `_client_topics_from_snapshot` (regenerate) is still
+   title-based (snapshot has no ids) — known, lower risk.
+2. **Embed clause regression:** ReviewPipelinePanel builds the embed preview on
+   `editContent || selected.content || selected.baseline` so the empty-seed editor can't cause the
+   clause to REPLACE the section's stored client text.
+3. **Duplicate benchmark names:** pins are qualified `parent|name`. Picker MenuItem value =
+   `parent|name` for subtopics (renderValue shows "name — parent"); backend `_flatten_benchmark_units`
+   carries `parent`; `_resolve_benchmark_unit_by_name` resolves qualified pins (parent+name → name-only
+   fallback if parent renamed → plain resolution for old/unqualified pins & persisted benchmark_match);
+   new `_pin_name` helper used in both `benchmark_source` computations. Old plain-name pins keep the
+   previous first-occurrence behavior (back-compat).
+UNTESTED here (no build/test in this env).
 
 ## Benchmark matching v2 + match picker + empty working content (2026-07-02)
 Three asks: better section↔benchmark matching, a picker instead of paste-text-only manual matching, and

@@ -57,6 +57,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
 
+
+def _require_docx(upload: Optional[UploadFile], label: str) -> None:
+    """Reject any upload that isn't a Word .docx — no PDF/.doc/other formats (no OCR integration)."""
+    if upload is not None and not (upload.filename or "").lower().endswith(".docx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{label} must be a Word (.docx) file — PDF and other formats are not supported",
+        )
+
+
 def get_draft_service():
     """Dependency to get draft service instance."""
     storage = DraftStorageService(
@@ -202,11 +212,13 @@ async def initialize_draft_from_upload_endpoint(
     """
     logger.info(f"Upload-based draft initialization requested by user: {current_user.get('email')}")
 
-    if not policy_file.filename.endswith(".docx"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .docx files are supported"
-        )
+    # Every uploaded document must be Word (.docx) — the parser has no PDF/OCR support, and
+    # non-.docx files were previously accepted here and then silently dropped downstream.
+    _require_docx(policy_file, "The policy document")
+    _require_docx(previous_policy_file, "The previous policy document")
+    _require_docx(benchmark_file, "The benchmark document")
+    for rf in regulations_files or []:
+        _require_docx(rf, f"Regulation file '{rf.filename}'")
 
     try:
         from app.models.draft_models import ClientMetadata
@@ -342,13 +354,16 @@ async def apply_topic_gap(
 ):
     """Apply the reviewer-confirmed gap findings to a topic, preserving the baseline."""
     logger.info(f"Apply-gap requested for draft {draft_id} topic {topic_id} by {current_user.get('email')}")
-    result = await draft_service.apply_gap_for_topic(
-        draft_id=draft_id,
-        topic_id=topic_id,
-        request=request,
-        vector_store=get_store(),
-        llm_service=get_llm()
-    )
+    try:
+        result = await draft_service.apply_gap_for_topic(
+            draft_id=draft_id,
+            topic_id=topic_id,
+            request=request,
+            vector_store=get_store(),
+            llm_service=get_llm()
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1401,8 +1416,7 @@ async def extract_toc_from_file_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Parse an uploaded .docx and return its TOC structure so the reviewer can adopt it as the good TOC."""
-    if not file.filename.endswith(".docx"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only .docx files are supported")
+    _require_docx(file, "The TOC document")
     try:
         file_bytes = await file.read()
         preview = draft_service.extract_toc_from_file(file_bytes)
@@ -1492,7 +1506,10 @@ async def approve_toc_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Lock the good TOC as the agreed structure (the gate before per-section content work)."""
-    result = draft_service.approve_toc(draft_id, actor=current_user.get('email', ''))
+    try:
+        result = draft_service.approve_toc(draft_id, actor=current_user.get('email', ''))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
     draft_service.log_audit(draft_id, current_user.get('email', ''), "toc_approved")
@@ -1686,9 +1703,7 @@ async def upload_regulations_endpoint(
     text to the draft's regulation set so the per-section regulation check can retrieve from it."""
     files = []
     for rf in regulations_files:
-        if not (rf.filename or "").endswith(".docx"):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                detail="Only .docx regulation files are supported")
+        _require_docx(rf, f"Regulation file '{rf.filename}'")
         files.append((rf.filename, await rf.read()))
     result = draft_service.add_uploaded_regulations(draft_id, files)
     if result is None:

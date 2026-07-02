@@ -87,11 +87,23 @@ class WordExportService:
 
         filtered = []
         for t in toc:
-            closed_subs = [s for s in (t.get('subtopics') or []) if is_closed(s)]
+            closed_subs = [dict(s) for s in (t.get('subtopics') or []) if is_closed(s)]
             if is_closed(t) or closed_subs:
                 kept = dict(t)
                 kept['subtopics'] = closed_subs
+                if not is_closed(t):
+                    # Kept only because a subtopic is banked — emit the heading, but never the
+                    # topic's own UN-REVIEWED body text.
+                    kept['content'] = ''
+                    kept['summary'] = ''
                 filtered.append(kept)
+
+        # Renumber sequentially: survivors kept their original numbers, so a filtered export
+        # showed gaps ("a lone 3.") that read as a corrupt document.
+        for i, t in enumerate(filtered, 1):
+            t['order'] = i
+            for j, s in enumerate(t['subtopics'], 1):
+                s['order'] = j
 
         out = dict(draft_data)
         out['toc'] = filtered
@@ -180,6 +192,9 @@ class WordExportService:
     def _add_content(self, doc: Document, draft_data: Dict[str, Any]):
         """Add the actual content sections."""
         toc = draft_data.get('toc', [])
+        # Review exports are client deliverables: an empty section prints as a heading only —
+        # never the internal "[No content generated yet]" placeholder.
+        review_mode = bool((draft_data.get('metadata') or {}).get('review_mode'))
 
         for topic in toc:
             # Add topic heading
@@ -192,7 +207,7 @@ class WordExportService:
                 for paragraph in content.split('\n'):
                     if paragraph.strip():
                         doc.add_paragraph(paragraph.strip())
-            else:
+            elif not review_mode:
                 doc.add_paragraph("*[No content generated yet]*")
 
             # Add subtopics
@@ -209,7 +224,7 @@ class WordExportService:
                     for paragraph in sub_content.split('\n'):
                         if paragraph.strip():
                             doc.add_paragraph(paragraph.strip())
-                else:
+                elif not review_mode:
                     doc.add_paragraph("*[No content generated yet]*")
 
             # Add spacing between topics
