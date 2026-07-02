@@ -779,8 +779,11 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         benchmark_topics: List[Dict[str, Any]],
         draft_metadata,
         llm_service,
+        similarity_hints: str = "",
     ) -> Dict[str, Any]:
-        """Ask the LLM to decide the final TOC and the client<->benchmark mapping. Returns parsed dict."""
+        """Ask the LLM to decide the final TOC and the client<->benchmark mapping. `similarity_hints`
+        are content-based client<->benchmark pairs (computed upstream) that the LLM should merge rather
+        than duplicate. Returns parsed dict."""
         prompt = self.prompt_manager.get_prompt(
             "reconcile_toc",
             title=draft_metadata.title,
@@ -793,6 +796,7 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             review_intensity=getattr(draft_metadata, "review_intensity", "preserve") or "preserve",
             client_topics=self._format_topics_for_reconcile(client_topics),
             benchmark_topics=self._format_topics_for_reconcile(benchmark_topics),
+            similarity_hints=(similarity_hints or "None"),
         )
 
         response = await llm_service.generate(prompt)
@@ -1047,6 +1051,35 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         if proposed is not None:
             proposed = str(proposed).strip() or None
         return {"reply": str(data.get("reply", "")).strip(), "proposed_content": proposed}
+
+    async def extract_toc_from_content(self, document_excerpt: str, llm_service) -> List[Dict[str, Any]]:
+        """Recover the document's Table of Contents by giving the LLM the raw first pages and letting
+        it find the printed TOC (or infer structure from headings) - instead of feeding it a
+        possibly-wrong list of deterministically detected headings. Returns a flat, document-ordered
+        list of {"title", "level"} (titles verbatim so they map back to the body). [] on failure."""
+        if not document_excerpt or not document_excerpt.strip():
+            return []
+        prompt = self.prompt_manager.get_prompt("extract_toc", document_excerpt=document_excerpt)
+        try:
+            response = await llm_service.generate(prompt)
+            data = self._parse_json_object(response)
+        except Exception as e:
+            logger.error(f"Failed to parse extract_toc JSON: {e}")
+            return []
+        # No printed TOC detected → return nothing so the caller keeps the deterministic structure.
+        if str(data.get("source", "")).strip().lower() == "none":
+            return []
+        out: List[Dict[str, Any]] = []
+        for it in (data.get("toc") or []):
+            title = str(it.get("title", "")).strip()
+            if not title:
+                continue
+            try:
+                level = int(it.get("level", 1))
+            except (TypeError, ValueError):
+                level = 1
+            out.append({"title": title, "level": max(1, level)})
+        return out
 
 
     async def _generate_with_references(

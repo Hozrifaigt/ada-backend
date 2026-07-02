@@ -370,8 +370,16 @@ reconcile_toc:
     GOOD-STANDARD BENCHMARK TOPICS (reference for what a strong policy covers):
     {benchmark_topics}
 
+    SEMANTIC SIMILARITY HINTS (computed from the topics' CONTENT, not just their titles — each pair below
+    looks like the SAME section even though the titles differ; may say "None"):
+    {similarity_hints}
+
     INSTRUCTIONS:
     1. Produce the final ordered list of topics for this policy review, honoring the REVIEW INTENSITY above.
+    1b. Use the SEMANTIC SIMILARITY HINTS: when a benchmark topic is flagged as similar to a client topic,
+       they are the SAME section. Output ONE entry for the pair with "source":"both", "client_match" set to
+       that client topic's exact title, and "benchmark_match" set to the benchmark topic. Do NOT ALSO add
+       the benchmark topic as a separate new section — that would duplicate a section the client already has.
     2. CRITICAL — do NOT invent sections. Every final topic MUST come from the CLIENT POLICY TOPICS or the
        GOOD-STANDARD BENCHMARK TOPICS listed above. Reuse the EXACT title from one of those lists (you may
        lightly rename a CLIENT topic for clarity, but a "benchmark"/"both" topic's title must match a real
@@ -391,6 +399,90 @@ reconcile_toc:
       ],
       "assessment": {{"weak": false, "summary": "One sentence; if weak, say which areas and that Rebuild may help."}}
     }}
+
+extract_toc:
+  template: |
+    You are extracting the printed Table of Contents from the opening pages of a policy document.
+
+    WHAT YOU ARE GIVEN (first pages, one line per paragraph; a printed "Table of Contents" /
+    "Contents" list, if present, appears here - possibly indented to depth):
+    ---
+    {document_excerpt}
+    ---
+
+    HOW TO READ THE NUMBERING (important - schemes vary and are often MIXED in one document):
+    - Section labels come in many styles: Arabic (1, 2, 3), letters (A, B, C), Roman numerals
+      (I, II, III, IV, V), or dotted decimals (1, 1.1, 1.1.1). Indentation may also signal depth.
+    - Depth ("level") comes from the section LABEL, not from how far down the page a line sits.
+      A top-level marker (e.g. "A.", "B.", "1.", "2.", or a word like "Appendices") begins a
+      level-1 section; the labels that FOLLOW it and restart (e.g. "I.", "II.", "III.") are its
+      level-2 children. When the next top-level marker appears, the child numbering resets again.
+    - Dotted decimals map directly: "1" -> level 1, "1.1" -> level 2, "1.1.1" -> level 3.
+    - IGNORE a leading counter that simply increments by one on EVERY line down the whole list
+      (1, 2, 3, ... regardless of nesting) - that is an auto-generated list counter, not a section
+      number. Use the NEXT label on the line to decide the level.
+
+    INSTRUCTIONS:
+    1. ONLY act if the excerpt contains an actual printed "Table of Contents" / "Contents" list.
+       Otherwise return {{"source": "none", "toc": []}} and nothing else - never infer a structure
+       from body prose or headings.
+    2. Copy each title VERBATIM (same words, same order). Do NOT paraphrase, translate, or invent.
+       Strip ONLY: the auto-generated leading counter (above), trailing page numbers, and dot
+       leaders. KEEP the section's own label (e.g. "I. Policy Objective").
+    3. Assign "level" per HOW TO READ THE NUMBERING above.
+    4. Do NOT include the "Table of Contents" header line, cover-page text, headers/footers, or
+       bare page numbers as entries. Preserve document order.
+
+    EXAMPLES (input -> output):
+
+    Example 1 - dotted decimals:
+    1. Introduction
+    1.1 Purpose
+    1.2 Scope
+    2. Governance
+    ->
+    {{"source": "printed_toc", "toc": [
+      {{"title": "1. Introduction", "level": 1}},
+      {{"title": "1.1 Purpose", "level": 2}},
+      {{"title": "1.2 Scope", "level": 2}},
+      {{"title": "2. Governance", "level": 1}}
+    ]}}
+
+    Example 2 - MIXED letters / Arabic / Roman, with an auto counter to ignore:
+    1. A. Abbreviations and Acronyms
+    2. B. Introduction, Purpose, and Scope
+    3. C. Accounting Assumptions and Quality Characteristics
+    4. I. Accounting Assumptions and Concepts
+    5. II. Quality Characteristics
+    7. 1. Property, Plant, and Equipment (PPE)
+    8. I. Policy Objective
+    9. II. Scope
+    69. Appendices
+    70. I. Appendix I - Glossary Items
+    ->
+    {{"source": "printed_toc", "toc": [
+      {{"title": "A. Abbreviations and Acronyms", "level": 1}},
+      {{"title": "B. Introduction, Purpose, and Scope", "level": 1}},
+      {{"title": "C. Accounting Assumptions and Quality Characteristics", "level": 1}},
+      {{"title": "I. Accounting Assumptions and Concepts", "level": 2}},
+      {{"title": "II. Quality Characteristics", "level": 2}},
+      {{"title": "1. Property, Plant, and Equipment (PPE)", "level": 1}},
+      {{"title": "I. Policy Objective", "level": 2}},
+      {{"title": "II. Scope", "level": 2}},
+      {{"title": "Appendices", "level": 1}},
+      {{"title": "I. Appendix I - Glossary Items", "level": 2}}
+    ]}}
+
+    Example 3 - no contents list (prose only):
+    Company Overview
+    This document sets out our approach to ...
+    ->
+    {{"source": "none", "toc": []}}
+
+    OUTPUT FORMAT - return ONLY valid JSON, no other text:
+    {{"source": "printed_toc", "toc": [{{"title": "...", "level": 1}}]}}
+    Use "source": "printed_toc" ONLY when you extracted a real printed contents list; otherwise
+    {{"source": "none", "toc": []}}.
 
 gap_assessment:
   template: |

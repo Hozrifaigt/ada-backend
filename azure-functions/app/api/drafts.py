@@ -35,6 +35,7 @@ from app.models.draft_models import (
     ApplyGapRequest,
     ApplyGapResponse,
     AssessBatchRequest,
+    SetBenchmarkContentRequest,
     GapSummary,
     ConsistencyReport,
     DraftVersion,
@@ -794,6 +795,40 @@ async def update_topic_content(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update content"
         )
+
+
+@router.get("/{draft_id}/topics/{topic_id}/benchmark-content")
+async def get_benchmark_content(
+    draft_id: str,
+    topic_id: str,
+    subtopic_id: Optional[str] = None,
+    draft_service: DraftService = Depends(get_draft_service),
+    store = Depends(get_vector_store),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Return the benchmark text currently used for a section + its source
+    ('manual' | 'matched' | 'none'), so the reviewer can view/edit it."""
+    result = draft_service.get_benchmark_content_for_unit(draft_id, topic_id, store, subtopic_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
+@router.post("/{draft_id}/topics/{topic_id}/benchmark-content")
+async def set_benchmark_content(
+    draft_id: str,
+    topic_id: str,
+    request: SetBenchmarkContentRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Set (or clear, when content is empty) the reviewer's manual benchmark text for a section.
+    When set it overrides auto-matching for that section; re-run the Benchmark step to use it."""
+    logger.info(f"Set manual benchmark for draft {draft_id}, topic {topic_id} by user: {current_user.get('email')}")
+    result = draft_service.set_manual_benchmark(draft_id, topic_id, request.content, request.subtopic_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
 
 
 @router.get("/{draft_id}/progress", response_model=DraftProgress)

@@ -332,26 +332,32 @@ class DraftService:
             logger.info(f"Parsed client document: {len(topics)} topics "
                         f"(confidence: {(processed.get('metadata') or {}).get('confidence')})")
 
-            # Low-confidence extraction → LLM leveling pass: send the doc's first 300 words (the TOC,
-            # if any) + the detected headings; the LLM fixes the nesting. Content stays verbatim
-            # (reused from deterministic slicing). Deterministic result is kept on any failure.
+            # Low-confidence extraction → LLM TOC extraction: the deterministic parser's detected
+            # headings are unreliable here, so instead of re-leveling that (possibly wrong) list, we
+            # hand the LLM the document's FIRST PAGES of raw content and let it find the printed Table
+            # of Contents. If it detects a printed TOC it returns it (content is then mapped to those
+            # titles deterministically, staying verbatim); if it does NOT detect a printed TOC it
+            # returns nothing and we KEEP the deterministic structure — the LLM never guesses/infers.
+            # The authoritative styled-TOC path (confidence "high") is trusted as-is and skips this.
+            # Deterministic result is kept on any failure.
             conf = (processed.get("metadata") or {}).get("confidence")
-            needs_manual_toc = (conf == "empty")  # nothing to level — consultant builds the TOC
+            needs_manual_toc = (conf == "empty")  # nothing to extract — consultant builds the TOC
             if llm_service and conf not in ("high", "empty", None):
                 try:
-                    updates, drops = await self.generation_service.infer_heading_levels(
-                        processor.toc_context_for_llm(300), processor.get_heading_hints(), llm_service
-                    )
-                    if updates or drops:
-                        rebuilt = processor.rebuild_with_levels(updates, drops)
-                        if rebuilt.get("topics"):  # guard: don't let a degenerate result wipe the TOC
+                    excerpt = processor.toc_context_for_llm(300)  # first ~300 words, line-preserved
+                    toc_items = await self.generation_service.extract_toc_from_content(excerpt, llm_service)
+                    if toc_items:
+                        rebuilt = processor.build_from_extracted_toc(toc_items)
+                        if rebuilt and rebuilt.get("topics"):  # guard: don't let a degenerate result wipe the TOC
                             processed = rebuilt
                             topics = rebuilt.get("topics", [])
-                            logger.info(f"LLM leveling applied (was {conf}): {len(topics)} topics")
+                            logger.info(f"LLM TOC extraction applied (was {conf}): {len(topics)} topics")
                         else:
-                            logger.warning("LLM leveling produced no topics; keeping deterministic")
+                            logger.warning("LLM TOC extraction produced no topics; keeping deterministic")
+                    else:
+                        logger.info("LLM TOC extraction returned nothing; keeping deterministic")
                 except Exception as e:
-                    logger.warning(f"LLM leveling failed (non-fatal, using deterministic): {e}")
+                    logger.warning(f"LLM TOC extraction failed (non-fatal, using deterministic): {e}")
 
             # Extract text from uploaded regulations files (.docx only)
             uploaded_regulations_text = None
@@ -463,6 +469,7 @@ class DraftService:
                         benchmark_topics=benchmark_topics_for_toc,
                         draft_metadata=draft_metadata,
                         llm_service=llm_service,
+                        vector_store=vector_store,
                     )
                     draft_metadata.toc_reconciliation_note = recon_note
                 else:
@@ -611,15 +618,66 @@ class DraftService:
                 ))
         return toc
 
+    def _reconcile_vector_store(self):
+        """Best-effort access to the shared vector store for TOC-reconciliation embeddings (semantic
+        merge hints + dedup). Returns None if unavailable — reconciliation then stays LLM/title-only."""
+        try:
+            from app.api.policy.dependencies import vector_store as vs
+            return vs
+        except Exception:
+            return None
+
     async def _build_reconciled_toc(self, client_toc: List, benchmark_topics: List[Dict[str, Any]],
-                                    draft_metadata, llm_service):
+                                    draft_metadata, llm_service, vector_store=None):
         """
         Ask the LLM to decide the final TOC and the client<->benchmark mapping.
         Reuses each client TOCTopic (preserving content/subtopics) and appends benchmark-only
         topics. Returns (toc, reconciliation_note). Falls back to a naive union on failure.
+
+        De-dup: (A) content-based similarity hints steer the LLM to MERGE semantically-equivalent
+        client/benchmark topics with different titles; (C) a deterministic guardrail below merges any
+        benchmark-added topic that still means the same as a kept client topic.
         """
         from app.models.draft_models import TOCTopic
         review_intensity = getattr(draft_metadata, "review_intensity", "preserve") or "preserve"
+
+        # Embed each client + benchmark topic on TITLE + CONTENT so semantically-equivalent sections with
+        # different titles are recognised. Best-effort — no vector store → hints/dedup skipped (behaviour
+        # unchanged). Vectors are cached (self._embed) and reused by the dedup guardrail (C) below.
+        vs = vector_store or self._reconcile_vector_store()
+        client_vecs, bench_vecs = {}, {}
+        similarity_hints = ""
+        if vs is not None:
+            try:
+                for t in client_toc:
+                    key = (t.topic or "").strip().lower()
+                    if not key:
+                        continue
+                    v = self._embed(f"{t.topic}\n{(t.content or '')[:1500]}".strip(), vs)
+                    if v:
+                        client_vecs[key] = (t.topic, v)
+                for bt in benchmark_topics:
+                    name = (bt.get("topic") or bt.get("name") or "").strip()
+                    if not name:
+                        continue
+                    v = self._embed(f"{name}\n{(self._benchmark_topic_text(bt))[:1500]}".strip(), vs)
+                    if v:
+                        bench_vecs[name.lower()] = (name, v)
+                # A: for each benchmark topic, the best-matching client topic above the hint threshold.
+                hint_lines = []
+                for _, (bname, bvec) in bench_vecs.items():
+                    best_title, best_score = None, 0.0
+                    for (ctitle, cvec) in client_vecs.values():
+                        sc = self._cosine(bvec, cvec)
+                        if sc > best_score:
+                            best_title, best_score = ctitle, sc
+                    if best_title and best_score >= 0.75:
+                        hint_lines.append(f'- Benchmark "{bname}" == Client "{best_title}" (content similarity {best_score:.2f})')
+                similarity_hints = "\n".join(hint_lines)
+            except Exception as e:
+                logger.warning(f"TOC similarity hints failed (non-fatal): {e}")
+                client_vecs, bench_vecs, similarity_hints = {}, {}, ""
+
         try:
             client_dicts = [{"topic": t.topic, "content": t.content} for t in client_toc]
             data = await self.generation_service.reconcile_toc(
@@ -627,6 +685,7 @@ class DraftService:
                 benchmark_topics=benchmark_topics,
                 draft_metadata=draft_metadata,
                 llm_service=llm_service,
+                similarity_hints=similarity_hints,
             )
         except Exception as e:
             logger.warning(f"TOC reconciliation failed, falling back to naive union: {e}")
@@ -690,6 +749,41 @@ class DraftService:
                 key = (t.topic or "").strip().lower()
                 if key and key not in used_client:
                     final_toc.append(t)
+
+        # C — deterministic semantic dedup guardrail. If the LLM still produced a benchmark-added topic
+        # that MEANS the same (by title+content embedding) as a kept client topic, merge it INTO that
+        # client topic (keep the client's title/content, record benchmark_match + a note) instead of
+        # leaving a duplicate. Only added->client merges; two client topics are never merged.
+        if vs is not None and bench_vecs:
+            kept_vecs = []
+            for ct in [t for t in final_toc if not getattr(t, "added_from_benchmark", False)]:
+                cv = client_vecs.get((ct.topic or "").strip().lower())
+                vec = cv[1] if cv else self._embed(f"{ct.topic}\n{(ct.content or '')[:1500]}".strip(), vs)
+                if vec:
+                    kept_vecs.append((ct, vec))
+            MERGE_THRESHOLD = 0.82  # conservative — auto-removes a benchmark section; err toward keeping both
+            survivors = []
+            for entry in final_toc:
+                if getattr(entry, "added_from_benchmark", False):
+                    bref = bench_vecs.get((entry.benchmark_match or entry.topic or "").strip().lower())
+                    if bref is not None:
+                        _, bvec = bref
+                        best_ct, best_score = None, 0.0
+                        for (ct, cvec) in kept_vecs:
+                            sc = self._cosine(bvec, cvec)
+                            if sc > best_score:
+                                best_ct, best_score = ct, sc
+                        if best_ct is not None and best_score >= MERGE_THRESHOLD:
+                            if not best_ct.benchmark_match:
+                                best_ct.benchmark_match = entry.benchmark_match or entry.topic
+                            note = f"Also covers benchmark: {entry.benchmark_match or entry.topic}"
+                            prev = (best_ct.reconcile_note or "").strip()
+                            best_ct.reconcile_note = (prev + "; " + note) if prev else note
+                            logger.info(f"Dedup-merged benchmark section '{entry.topic}' into client topic "
+                                        f"'{best_ct.topic}' (content similarity {best_score:.2f})")
+                            continue  # drop the duplicate benchmark-added topic
+                survivors.append(entry)
+            final_toc = survivors
 
         if not final_toc:
             return self._naive_benchmark_union(client_toc, benchmark_topics), None
@@ -1824,6 +1918,12 @@ class DraftService:
     def _benchmark_content_for_unit(self, topic, subtopic, benchmark_topics, vector_store):
         """Return (benchmark_content, benchmark_name) for a gap unit, matched by TITLE + CONTENT across
         the whole benchmark tree (topics + subtopics), confidence-gated."""
+        # Reviewer override: if this unit has manually-supplied benchmark text, use it verbatim and
+        # skip auto-matching entirely (works whether or not a benchmark topic would have matched).
+        unit = subtopic or topic
+        manual = (getattr(unit, "manual_benchmark_content", None) or "").strip()
+        if manual:
+            return manual, "Manual benchmark"
         # Leaf top-level section → search the whole benchmark tree by title+content (handles renamed /
         # flattened sections like "High-Level TEC Procurement" → benchmark's nested "Procurement Governance").
         if subtopic is None and not getattr(topic, "subtopics", None):
@@ -1860,6 +1960,55 @@ class DraftService:
                 benchmark_topics, vector_store)
         # Topic WITH subtopics → its intro only (the subtopics are assessed on their own).
         return (self._benchmark_topic_intro(bt) or None), topic_name
+
+    def set_manual_benchmark(self, draft_id: str, topic_id: str, content: str,
+                             subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Set (or clear, when content is blank) the reviewer's manual benchmark text for a section.
+        When set it overrides auto-matching for that section across ALL benchmark paths."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic = next((t for t in draft.toc if t.topic_id == topic_id), None)
+        if not topic:
+            return None
+        unit = topic
+        if subtopic_id:
+            unit = next((s for s in topic.subtopics if s.subtopic_id == subtopic_id), None)
+            if not unit:
+                return None
+        text = (content or "").strip()
+        unit.manual_benchmark_content = text or None
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return {
+            "topic_id": topic_id,
+            "subtopic_id": subtopic_id,
+            "has_manual_benchmark": bool(text),
+            "message": "Manual benchmark saved" if text else "Manual benchmark cleared",
+        }
+
+    def get_benchmark_content_for_unit(self, draft_id: str, topic_id: str, vector_store,
+                                       subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the benchmark text currently used for a section + its source, so the reviewer can
+        view/edit it. source: 'manual' (override set) | 'matched' (auto) | 'none' (nothing matched)."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic = next((t for t in draft.toc if t.topic_id == topic_id), None)
+        if not topic:
+            return None
+        subtopic = None
+        if subtopic_id:
+            subtopic = next((s for s in topic.subtopics if s.subtopic_id == subtopic_id), None)
+            if not subtopic:
+                return None
+        unit = subtopic or topic
+        manual = (getattr(unit, "manual_benchmark_content", None) or "").strip()
+        if manual:
+            return {"content": manual, "name": "Manual benchmark", "source": "manual"}
+        benchmark_topics = self._get_benchmark_topics(draft, vector_store)
+        content, name = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
+        return {"content": content or "", "name": name, "source": "matched" if content else "none"}
 
     def _surrounding_context_for_unit(self, topic, subtopic, draft=None) -> str:
         """Read-only context so a unit isn't assessed in isolation: parent intro + sibling subsections

@@ -3,21 +3,30 @@ import uuid
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from azure.data.tables import TableServiceClient, TableClient
+from azure.data.tables import TableServiceClient, TableClient, UpdateMode
 from azure.core.exceptions import ResourceNotFoundError, AzureError
 from app.models.draft_models import ClientMetadata, DraftMetadata, CompleteDraft
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# Azure Table entities are capped at 1 MB total (across all properties). Chunking only
+# dodges the per-property 64 KB limit, not this one. Above this char budget (~0.9 MB in
+# Table's UTF-16 accounting, with headroom for metadata props) we overflow the payload to
+# Blob storage and keep only a pointer in the entity.
+MAX_TABLE_CHARS = 450 * 1024
+OVERFLOW_CONTAINER = "draft-overflow"
 
 
 class DraftStorageService:
     """Azure Table Storage service for temporary draft management."""
-    
+
     def __init__(self, connection_string: str, table_name: str = "Drafts"):
         """Initialize Azure Table Storage client."""
         self.table_name = table_name
         self.connection_string = connection_string
-        
+        self._blob_container = None  # lazily created BlobContainerClient for oversized payloads
+
         try:
             self.table_service = TableServiceClient.from_connection_string(
                 conn_str=connection_string
@@ -47,6 +56,50 @@ class DraftStorageService:
             else:
                 logger.warning(f"Error ensuring table exists: {e}")
     
+    def _overflow_container(self):
+        """Lazily build/return the Blob container client used for oversized payloads."""
+        if self._blob_container is None:
+            from azure.storage.blob import BlobServiceClient
+            # Use the SAME account/connection string that hosts the Drafts table (passed to
+            # __init__). A storage-account connection string serves both Table and Blob
+            # endpoints, so the drafts account holds the overflow blobs too — guaranteed
+            # reachable with the same creds. (The separate AZURE_STORAGE_CONNECTION_STRING
+            # blob setting may be blank in some environments.)
+            conn_str = self.connection_string or settings.AZURE_STORAGE_CONNECTION_STRING
+            blob_service = BlobServiceClient.from_connection_string(conn_str)
+            container = blob_service.get_container_client(OVERFLOW_CONTAINER)
+            try:
+                container.create_container()
+            except Exception:
+                pass  # already exists (or created concurrently)
+            self._blob_container = container
+        return self._blob_container
+
+    def _store_payload(self, entity: Dict[str, Any], json_str: str, blob_name: str) -> Dict[str, Any]:
+        """
+        Store a JSON payload on an entity: chunk into table properties when small enough,
+        otherwise overflow the whole payload to a blob and leave only a pointer.
+        """
+        if len(json_str) <= MAX_TABLE_CHARS:
+            entity.pop('draft_data_blob', None)  # ensure no stale overflow marker
+            return self._chunk_json_into_entity(entity, json_str)
+
+        self._overflow_container().upload_blob(
+            name=blob_name, data=json_str.encode('utf-8'), overwrite=True
+        )
+        entity['draft_data_blob'] = blob_name
+        entity['draft_chunks'] = 0
+        logger.info(f"Payload {len(json_str)} chars exceeds table limit; stored in blob '{blob_name}'")
+        return entity
+
+    def _load_payload(self, entity: Dict[str, Any]) -> str:
+        """Read a JSON payload stored by _store_payload (blob overflow or table chunks)."""
+        blob_name = entity.get('draft_data_blob')
+        if blob_name:
+            data = self._overflow_container().download_blob(blob_name).readall()
+            return data.decode('utf-8')
+        return self._read_chunked_json(entity)
+
     def _serialize_draft(self, draft: Dict[str, Any]) -> Dict[str, Any]:
         """
         Serialize draft data for Azure Table Storage.
@@ -56,9 +109,6 @@ class DraftStorageService:
         try:
             draft_id = draft["id"]
             draft_json = json.dumps(draft, ensure_ascii=False)
-
-            # Check if draft_data exceeds 60KB (leave some buffer)
-            max_size = 60 * 1024  # 60KB buffer
 
             # Create entity with required keys
             entity = {
@@ -77,27 +127,8 @@ class DraftStorageService:
                 'policy_type': draft["metadata"].get('policy_type', ''),
             }
 
-            # Handle large draft data by splitting across multiple properties
-            # Use character-based splitting to avoid UTF-8 issues
-            if len(draft_json) <= (max_size // 2):  # Divide by 2 for UTF-16 safety
-                # Small enough to fit in one property
-                entity['draft_data'] = draft_json
-                entity['draft_chunks'] = 1
-            else:
-                # Split into character-based chunks to avoid UTF-8 corruption
-                chunk_size = max_size // 2  # Safe for UTF-16 encoding
-                chunks = []
-
-                for i in range(0, len(draft_json), chunk_size):
-                    chunk = draft_json[i:i+chunk_size]
-                    chunks.append(chunk)
-
-                # Store chunks as separate properties
-                entity['draft_chunks'] = len(chunks)
-                for i, chunk in enumerate(chunks):
-                    entity[f'draft_data_{i}'] = chunk
-
-                logger.info(f"Split large draft into {len(chunks)} chunks (total chars: {len(draft_json)})")
+            # Chunk into table properties, or overflow to blob when past the 1 MB entity cap.
+            self._store_payload(entity, draft_json, blob_name=f"draft_{draft_id}.json")
 
             return entity
 
@@ -109,24 +140,8 @@ class DraftStorageService:
     def _deserialize_draft(self, entity: Dict[str, Any]) -> Dict[str, Any]:
         """Deserialize draft data from Azure Table Storage."""
         try:
-            # Check if data is chunked
-            chunk_count = entity.get('draft_chunks', 1)
-
-            if chunk_count == 1:
-                # Single chunk - use draft_data directly
-                draft_json = entity.get('draft_data', '')
-            else:
-                # Multiple chunks - reassemble
-                chunks = []
-                for i in range(chunk_count):
-                    chunk_key = f'draft_data_{i}'
-                    if chunk_key in entity:
-                        chunks.append(entity[chunk_key])
-                    else:
-                        logger.warning(f"Missing chunk {i} for draft")
-
-                draft_json = ''.join(chunks)
-                logger.info(f"Reassembled draft from {chunk_count} chunks")
+            # Read from blob overflow or reassemble from table chunks.
+            draft_json = self._load_payload(entity)
 
             # Parse the JSON draft data
             draft = json.loads(draft_json)
@@ -225,7 +240,10 @@ class DraftStorageService:
             logger.info(f"DEBUG: After model_dump - dict has {total_conversations_dict} total conversation entries")
 
             entity = self._serialize_draft(draft_dict)
-            self.table_client.upsert_entity(entity=entity)
+            # REPLACE (not the default MERGE) so properties dropped between saves — stale
+            # chunk props or a blob pointer when a draft shrinks back under the limit — are
+            # actually removed. Safe because _serialize_draft rebuilds the full entity.
+            self.table_client.upsert_entity(entity=entity, mode=UpdateMode.REPLACE)
 
 
             logger.info(f"Updated draft: {draft_id}")
@@ -248,7 +266,13 @@ class DraftStorageService:
                 partition_key='draft',
                 row_key=draft_id
             )
-            
+
+            # Best-effort cleanup of the overflow blob (only exists for oversized drafts).
+            try:
+                self._overflow_container().delete_blob(f"draft_{draft_id}.json")
+            except Exception:
+                pass
+
             logger.info(f"Deleted draft: {draft_id}")
             return True
             
@@ -473,7 +497,7 @@ class DraftStorageService:
                 'reason': reason or '',
                 'size': len(draft_json),
             }
-            self._chunk_json_into_entity(entity, draft_json)
+            self._store_payload(entity, draft_json, blob_name=f"version_{draft_id}_{version_id}.json")
             self.table_client.create_entity(entity=entity)
             logger.info(f"Created version {version_id} for draft {draft_id} (label='{label}')")
             return version_id
@@ -506,7 +530,7 @@ class DraftStorageService:
         """Load a snapshot as a CompleteDraft."""
         try:
             entity = self.table_client.get_entity(partition_key=f'version_{draft_id}', row_key=version_id)
-            draft_json = self._read_chunked_json(entity)
+            draft_json = self._load_payload(entity)
             return CompleteDraft(**json.loads(draft_json))
         except ResourceNotFoundError:
             logger.warning(f"Version {version_id} not found for draft {draft_id}")

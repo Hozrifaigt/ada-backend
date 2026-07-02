@@ -146,6 +146,25 @@ class DocumentProcessor:
             except Exception:
                 continue
 
+    def _iter_block_items(self):
+        """Yield body-level paragraphs AND tables in document order. python-docx's
+        Document.paragraphs skips tables, so any content mapping based on it silently drops tabular
+        content. Iterating the body's direct children keeps both, letting a table's text land under
+        the heading it actually sits beneath. For a table-less document this yields exactly the same
+        paragraphs as doc.paragraphs, in the same order, so existing behaviour is unchanged."""
+        try:
+            body = self.doc.element.body
+        except Exception:
+            return
+        for child in body.iterchildren():
+            try:
+                if child.tag == qn('w:p'):
+                    yield Paragraph(child, self.doc)
+                elif child.tag == qn('w:tbl'):
+                    yield Table(child, self.doc)
+            except Exception:
+                continue
+
     def toc_outline(self) -> str:
         """The document's PRINTED table of contents rendered as an INDENTED outline (indentation =
         depth), reconstructed from 'TOC 1/2/3'-styled paragraphs. Returns '' when the document has no
@@ -219,6 +238,29 @@ class DocumentProcessor:
         self._flat = new_flat
         return self._assemble_result(new_flat)
 
+    def build_from_extracted_toc(self, toc_items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Build the document structure from an LLM-extracted Table of Contents (a flat list of
+        {"title", "level"}). Titles are located in the body and content is mapped deterministically —
+        so content stays verbatim, exactly like the styled-TOC paths. Used when the deterministic
+        parser was unreliable and the LLM recovered the real TOC from the document's first pages.
+        Returns None if fewer than 2 usable entries."""
+        flat: List[TOCEntry] = []
+        for it in (toc_items or []):
+            title = (it.get("title") or "").strip()
+            if not title:
+                continue
+            try:
+                level = max(1, int(it.get("level", 1)))
+            except (TypeError, ValueError):
+                level = 1
+            flat.append(TOCEntry(level=level, title=title,
+                                 source_method="llm_toc", confidence="toc"))
+        if len(flat) < 2:
+            return None
+        self._map_content_to_toc_entries(flat)
+        self._flat = flat
+        return self._assemble_result(flat)
+
     def _is_toc_header(self, para: Paragraph) -> bool:
         """Checks if a paragraph is a likely 'Table of Contents' header."""
         text = para.text.strip().lower()
@@ -251,8 +293,8 @@ class DocumentProcessor:
         paragraphs), which carry both the exact titles and the exact depth. Traverses content controls
         (w:sdt) so a Word-generated TOC is seen. Content is then mapped from the body by matching each
         TOC title to its heading. Returns [] when the document has no styled TOC."""
-        entries: List[TOCEntry] = []
-        prev_level = None
+        # Pass 1: collect every styled TOC line with its 'TOC n' style level and cleaned title.
+        raw: List[Tuple[int, str]] = []
         for para in self._iter_body_paragraphs():
             try:
                 name = (para.style.name or "").lower() if para.style else ""
@@ -264,22 +306,38 @@ class DocumentProcessor:
             title = self._clean_toc_title(para.text)
             if not title:
                 continue
-            # Depth priority: the dotted section number (reliable even when the TOC is styled flat) →
-            # else stay within the current section as a sibling of the previous entry (so an unnumbered
-            # line like "External Vendors" doesn't reset to top level and hijack the entries after it)
-            # → else, for the very first entry, the 'TOC n' style level.
+            raw.append((int(m.group(1)), title))
+        if not raw:
+            return []
+
+        # Does the TOC's OWN styling express depth (TOC1/TOC2/TOC3), or is it flat (every line TOC1)?
+        # A Word auto-generated TOC carries the real hierarchy in these styles even when the visible
+        # labels are letters or Roman numerals (A., B., I., II., ...) that no numbering rule can rank.
+        style_levels = {lvl for lvl, _ in raw}
+        multi_level_styles = len(style_levels) > 1
+        min_style = min(style_levels)
+
+        entries: List[TOCEntry] = []
+        prev_level = None
+        for style_level, title in raw:
+            # Depth priority: (1) an explicit dotted section number ("1.1" -> 2) is authoritative;
+            # (2) else the TOC style depth when the styles express nesting (normalised so the
+            # shallowest style becomes level 1) — this recovers letter/Roman hierarchies; (3) else stay
+            # a sibling of the previous entry, so an unnumbered line doesn't reset to top level;
+            # (4) else the (normalised) style level.
             num_level = self._level_from_numbering(title)
             if num_level:
                 level = num_level
+            elif multi_level_styles:
+                level = style_level - min_style + 1
             elif prev_level is not None:
                 level = prev_level
             else:
-                level = int(m.group(1))
+                level = style_level - min_style + 1
             entries.append(TOCEntry(level=level, title=title,
                                     source_method="toc_field", confidence="toc"))
             prev_level = level
-        if entries:
-            self._map_content_to_toc_entries(entries)
+        self._map_content_to_toc_entries(entries)
         return entries
 
     def _extract_from_plaintext_toc(self) -> List[TOCEntry]:
@@ -381,7 +439,17 @@ class DocumentProcessor:
         current_content = []
         last_entry = None
 
-        for i, para in enumerate(paras):
+        # Walk body blocks (paragraphs AND tables) in order so a table's text is folded into the
+        # section it sits under, instead of being dropped or piled onto the last section.
+        for i, item in enumerate(self._iter_block_items()):
+            if isinstance(item, Table):
+                if last_entry:
+                    table_text = self._extract_table_text(item)
+                    if table_text:
+                        current_content.append(f"[Table]\n{table_text}")
+                continue
+
+            para = item
             text = para.text.strip()
             if not text:
                 continue
@@ -418,8 +486,6 @@ class DocumentProcessor:
         if last_entry and current_content:
             last_entry.content = '\n'.join(current_content).strip()
             last_entry.has_content = bool(last_entry.content)
-
-        self._add_table_content_to_entries(toc_entries)
 
         return toc_entries
 
@@ -501,22 +567,39 @@ class DocumentProcessor:
         return False, 0, ""
 
     def _map_content_to_toc_entries(self, toc_entries: List[TOCEntry], search_from: int = 0):
-        """Maps content to TOC entries using a robust two-pass approach. `search_from` restricts the
-        body search to paragraphs at/after that index — used by the typed-TOC path so the TOC's own
-        lines (which sit in the body) are not matched as the sections themselves."""
+        """Maps content to TOC entries using a robust two-pass approach, over an ordered list of body
+        BLOCKS (paragraphs AND tables) so tabular content is captured under the right section — the
+        old paragraph-only slicing dropped tables entirely. `search_from` restricts the search to
+        paragraphs at/after that index — used by the typed-TOC path so the TOC's own lines (which sit
+        in the body) are not matched as the sections themselves."""
         if not toc_entries:
             return
 
-        all_paras = self.doc.paragraphs
+        # Ordered body blocks. Paragraph blocks carry the Paragraph (for heading detection); table
+        # blocks carry only their rendered text. Paragraph blocks are 1:1 (and in order) with
+        # doc.paragraphs, so a `search_from` paragraph index maps cleanly onto them.
+        blocks: List[Dict[str, Any]] = []
+        for item in self._iter_block_items():
+            if isinstance(item, Table):
+                table_text = self._extract_table_text(item)
+                blocks.append({"text": f"[Table]\n{table_text}" if table_text else "", "para": None})
+            else:
+                blocks.append({"text": item.text.strip(), "para": item})
 
-        # Find the paragraph index for each TOC entry title
+        # Translate the paragraph-based `search_from` into a block index.
+        para_block_positions = [i for i, b in enumerate(blocks) if b["para"] is not None]
+        start_block = para_block_positions[search_from] if search_from < len(para_block_positions) else len(blocks)
+
+        # Find the block index for each TOC entry title
         for entry in toc_entries:
             found_index = -1
 
             # Pass 1: Look for a perfect match (text match + heading style)
-            for i in range(search_from, len(all_paras)):
-                para = all_paras[i]
-                if self._text_matches_title(para.text.strip(), entry.title):
+            for i in range(start_block, len(blocks)):
+                para = blocks[i]["para"]
+                if para is None:
+                    continue
+                if self._text_matches_title(blocks[i]["text"], entry.title):
                     is_heading, _, _ = self._is_heading(para)
                     if is_heading:
                         found_index = i
@@ -524,29 +607,29 @@ class DocumentProcessor:
 
             # Pass 2: If no perfect match, find the first text-only match
             if found_index == -1:
-                for i in range(search_from, len(all_paras)):
-                    para = all_paras[i]
-                    if self._text_matches_title(para.text.strip(), entry.title):
+                for i in range(start_block, len(blocks)):
+                    if blocks[i]["para"] is None:
+                        continue
+                    if self._text_matches_title(blocks[i]["text"], entry.title):
                         found_index = i
                         break
 
             entry.para_index = found_index if found_index != -1 else None
-        
+
         # Filter and sort entries that were successfully located
-        located_entries = sorted([e for e in toc_entries if e.para_index is not None], 
+        located_entries = sorted([e for e in toc_entries if e.para_index is not None],
                                 key=lambda x: x.para_index)
-        
-        # Assign content between one heading and the next
+
+        # Assign content (paragraphs AND tables) between one heading and the next
         for i, entry in enumerate(located_entries):
             start_index = entry.para_index + 1
-            end_index = len(all_paras)
-            
+            end_index = len(blocks)
+
             if i + 1 < len(located_entries):
                 end_index = located_entries[i+1].para_index
-            
-            content_paras = all_paras[start_index:end_index]
-            content = '\n'.join([p.text.strip() for p in content_paras if p.text.strip()])
-            
+
+            content = '\n'.join(blocks[j]["text"] for j in range(start_index, end_index) if blocks[j]["text"])
+
             entry.content = content.strip()
             if entry.content:
                 entry.has_content = True
@@ -560,17 +643,6 @@ class DocumentProcessor:
             return False
         
         return title_normalized in text_normalized or text_normalized in title_normalized
-
-    def _add_table_content_to_entries(self, toc_entries: List[TOCEntry]):
-        """Add table content to the appropriate TOC entries."""
-        tables_text = []
-        for table in self.doc.tables:
-            table_content = self._extract_table_text(table)
-            if table_content:
-                tables_text.append(f"\n[Table Content]\n{table_content}\n")
-        
-        if toc_entries and tables_text:
-            toc_entries[-1].content += '\n'.join(tables_text)
 
     def _extract_table_text(self, table: Table) -> str:
         """Extract text from a table."""
@@ -695,9 +767,19 @@ class DocumentProcessor:
         return toc
 
     def _get_full_text(self) -> str:
-        """Get the full document text."""
-        paragraphs = [para.text.strip() for para in self.doc.paragraphs if para.text.strip()]
-        return '\n'.join(paragraphs)
+        """Get the full document text, INCLUDING table content (doc.paragraphs skips tables), in
+        document order — so benchmark summaries / regulation text don't silently lose tabular text."""
+        parts = []
+        for item in self._iter_block_items():
+            if isinstance(item, Table):
+                table_text = self._extract_table_text(item)
+                if table_text:
+                    parts.append(table_text)
+            else:
+                text = item.text.strip()
+                if text:
+                    parts.append(text)
+        return '\n'.join(parts)
 
     def _confidence_metrics(self, flat_entries: List[TOCEntry]) -> Dict[str, Any]:
         """Signals for whether the detected structure is trustworthy (deterministic) or whether the
@@ -734,7 +816,12 @@ class DocumentProcessor:
         if total == 0:
             confidence, reason = "empty", "no_headings"
         elif toc_sourced:
-            confidence, reason = "high", ""
+            # A styled TOC is authoritative on titles, but if it STILL came out essentially flat
+            # (many entries, ~no nesting) its hierarchy was lost — route to the LLM TOC extractor.
+            if flat:
+                confidence, reason = "low", "toc_flat"
+            else:
+                confidence, reason = "high", ""
         elif weak_ratio > 0.1:
             confidence, reason = "low", "heuristic_headings"
         elif flat:
