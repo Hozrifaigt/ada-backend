@@ -1053,6 +1053,72 @@ async def export_draft_to_pdf(
         )
 
 
+def _review_export_prereqs(draft_service: DraftService, draft_id: str):
+    """Shared checks + inputs for the review-draft export variants (redline / changes overview).
+    Returns (draft_dict, original_dict, filename_slug)."""
+    draft = draft_service.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    if not (draft.get("metadata") or {}).get("review_mode"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="This export is only available for review drafts")
+    original = draft_service.storage.get_original_version(draft_id)
+    original_dict = original.model_dump(mode='json') if original else None
+    safe = "".join(c for c in draft["metadata"]["title"] if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')[:50]
+    return draft, original_dict, safe or "policy"
+
+
+_WORD_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _review_variant_response(variant: str, fmt: str, draft_service: DraftService,
+                             draft_id: str, actor: str) -> StreamingResponse:
+    """Build a redline / changes-overview export in the requested format (word | pdf)."""
+    if fmt not in ("word", "pdf"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Format must be 'word' or 'pdf'")
+    draft, original_dict, safe = _review_export_prereqs(draft_service, draft_id)
+    if fmt == "word":
+        from app.services.word_export_service import WordExportService
+        service = WordExportService()
+        media, ext = _WORD_MIME, "docx"
+    else:
+        from app.services.pdf_export_service import PDFExportService
+        service = PDFExportService()
+        media, ext = "application/pdf", "pdf"
+    builder = service.export_review_redline if variant == "redline" else service.export_changes_overview
+    stream = builder(draft, original_dict)
+    label = "Redline" if variant == "redline" else "Changes overview"
+    draft_service.log_audit(draft_id, actor, "exported", summary=f"{label} ({fmt})")
+    return StreamingResponse(
+        stream, media_type=media,
+        headers={"Content-Disposition": f"attachment; filename={safe}_{variant}.{ext}"}
+    )
+
+
+@router.post("/{draft_id}/export/redline/{fmt}")
+async def export_redline(
+    draft_id: str,
+    fmt: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Redline export (word | pdf) for a review draft: additions highlighted green, removals red +
+    strikethrough, plus the sections the review dropped."""
+    return _review_variant_response("redline", fmt, draft_service, draft_id, current_user.get('email', ''))
+
+
+@router.post("/{draft_id}/export/changes/{fmt}")
+async def export_changes(
+    draft_id: str,
+    fmt: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Changes-overview export (word | pdf) for a review draft: per-section Added/Modified/Unchanged
+    with word deltas + the removed-sections list."""
+    return _review_variant_response("changes", fmt, draft_service, draft_id, current_user.get('email', ''))
+
+
 # TOC Chat Endpoints
 
 @router.post("/{draft_id}/toc/chat")

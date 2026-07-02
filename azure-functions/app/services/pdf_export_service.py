@@ -1,6 +1,7 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from io import BytesIO
+from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -8,6 +9,8 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
 from reportlab.lib import colors
 from datetime import datetime
+
+from app.services.review_diff import diff_ops, filter_review_draft, review_units, removed_sections
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ class PDFExportService:
             BytesIO: PDF document as bytes
         """
         try:
+            # Review drafts: export only the banked (closed) sections once any have been closed —
+            # same rule as the Word export (this path previously leaked unreviewed sections).
+            draft_data = filter_review_draft(draft_data)
+
             pdf_stream = BytesIO()
             doc = SimpleDocTemplate(
                 pdf_stream,
@@ -67,6 +74,147 @@ class PDFExportService:
         except Exception as e:
             logger.error(f"Failed to export draft to PDF: {e}")
             raise ValueError(f"PDF export failed: {str(e)}")
+
+    # ===== Review-draft export variants: redline + changes overview =====
+    # (diff/flatten helpers shared with the Word builder via app.services.review_diff)
+
+    @staticmethod
+    def _redline_markup(old: str, new: str) -> str:
+        """Inline reportlab markup for a word-level redline: additions green-highlighted, removals
+        red + strikethrough. Text is XML-escaped before wrapping."""
+        parts = []
+        for op, text in diff_ops(old, new):
+            if not text:
+                continue
+            t = escape(text)
+            if op == "added":
+                parts.append(f'<font backColor="#bbf7d0" color="#166534">{t}</font>')
+            elif op == "removed":
+                parts.append(f'<font backColor="#fecaca" color="#991b1b"><strike>{t}</strike></font>')
+            else:
+                parts.append(t)
+        return " ".join(parts)
+
+    def export_review_redline(self, draft_data: Dict[str, Any],
+                              original_data: Optional[Dict[str, Any]] = None) -> BytesIO:
+        """Redline PDF for a review draft: per section, the frozen client baseline vs the reviewed
+        content — additions green, removals red + strikethrough; removed sections appended."""
+        try:
+            pdf_stream = BytesIO()
+            doc = SimpleDocTemplate(pdf_stream, pagesize=letter,
+                                    rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+            styles = self._setup_styles()
+            story: List = []
+
+            self._add_title_page(story, draft_data['metadata'], styles)
+            story.append(PageBreak())
+            story.append(Paragraph('Redline — changes vs the original policy', styles['CustomHeading1']))
+            story.append(Paragraph(
+                '<font backColor="#bbf7d0" color="#166534">added text</font>   '
+                '<font backColor="#fecaca" color="#991b1b"><strike>removed text</strike></font>',
+                styles['Normal']))
+            story.append(Spacer(1, 16))
+
+            for u in review_units(draft_data):
+                heading = escape(u["label"])
+                if u["added"]:
+                    heading += '  <font backColor="#bbf7d0" color="#166534">(new section)</font>'
+                story.append(Paragraph(heading, styles['CustomHeading1' if u["level"] == 1 else 'CustomHeading2']))
+                if u["old"] == u["new"]:
+                    for para in u["new"].split("\n"):
+                        if para.strip():
+                            story.append(Paragraph(escape(para.strip()), styles['Normal']))
+                            story.append(Spacer(1, 6))
+                else:
+                    story.append(Paragraph(self._redline_markup(u["old"], u["new"]), styles['Normal']))
+                    story.append(Spacer(1, 10))
+
+            removed = removed_sections(draft_data, original_data)
+            if removed:
+                story.append(PageBreak())
+                story.append(Paragraph('Removed sections', styles['CustomHeading1']))
+                for rm in removed:
+                    story.append(Paragraph(
+                        f'<font color="#991b1b">{escape(rm["title"])}</font>', styles['CustomHeading2']))
+                    if rm["content"]:
+                        story.append(Paragraph(
+                            f'<font backColor="#fecaca" color="#991b1b"><strike>{escape(rm["content"])}</strike></font>',
+                            styles['Normal']))
+                        story.append(Spacer(1, 8))
+
+            doc.build(story)
+            pdf_stream.seek(0)
+            return pdf_stream
+        except Exception as e:
+            logger.error(f"Failed to export redline PDF: {e}")
+            raise ValueError(f"Redline PDF export failed: {str(e)}")
+
+    def export_changes_overview(self, draft_data: Dict[str, Any],
+                                original_data: Optional[Dict[str, Any]] = None) -> BytesIO:
+        """Changes-overview PDF: per-section Added / Modified / Unchanged with word deltas + the
+        removed-sections list."""
+        try:
+            pdf_stream = BytesIO()
+            doc = SimpleDocTemplate(pdf_stream, pagesize=letter,
+                                    rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+            styles = self._setup_styles()
+            story: List = []
+            meta = draft_data.get('metadata') or {}
+
+            story.append(Paragraph(escape(f"{meta.get('title', 'Policy')} — Changes Overview"), styles['CustomTitle']))
+            story.append(Spacer(1, 12))
+
+            units = review_units(draft_data)
+            removed = removed_sections(draft_data, original_data)
+            rows = []
+            added_n = modified_n = unchanged_n = 0
+            for u in units:
+                if u["added"] or (not u["old"] and u["new"]):
+                    status, added_n = "Added", added_n + 1
+                elif u["old"] == u["new"]:
+                    status, unchanged_n = "Unchanged", unchanged_n + 1
+                else:
+                    status, modified_n = "Modified", modified_n + 1
+                ops = diff_ops(u["old"], u["new"]) if status == "Modified" else []
+                plus = sum(len(t.split()) for op, t in ops if op == "added")
+                minus = sum(len(t.split()) for op, t in ops if op == "removed")
+                rows.append((u, status, plus, minus))
+
+            story.append(Paragraph(
+                f'<b>{len(units)} sections reviewed</b> — '
+                f'<font color="#15803d">{added_n} added</font>, '
+                f'<font color="#b45309">{modified_n} modified</font>, '
+                f'{unchanged_n} unchanged, '
+                f'<font color="#b91c1c">{len(removed)} removed</font>',
+                styles['Normal']))
+            story.append(Spacer(1, 16))
+
+            story.append(Paragraph('Section changes', styles['CustomHeading1']))
+            STATUS_COLOR = {"Added": "#15803d", "Modified": "#b45309", "Unchanged": "#64748b"}
+            for u, status, plus, minus in rows:
+                line = f'<b>{escape(u["label"])}</b> — <font color="{STATUS_COLOR[status]}">{status}</font>'
+                if status == "Modified":
+                    line += f'  (+{plus} / −{minus} words)'
+                elif status == "Added" and u["new"]:
+                    line += f'  ({len(u["new"].split())} words)'
+                if u.get("note"):
+                    line += f' — <i>{escape(u["note"])}</i>'
+                story.append(Paragraph(line, styles['Normal']))
+                story.append(Spacer(1, 4))
+
+            if removed:
+                story.append(Spacer(1, 8))
+                story.append(Paragraph('Removed sections', styles['CustomHeading1']))
+                for rm in removed:
+                    story.append(Paragraph(f'<font color="#b91c1c">{escape(rm["title"])}</font>', styles['Normal']))
+                    story.append(Spacer(1, 4))
+
+            doc.build(story)
+            pdf_stream.seek(0)
+            return pdf_stream
+        except Exception as e:
+            logger.error(f"Failed to export changes-overview PDF: {e}")
+            raise ValueError(f"Changes-overview PDF export failed: {str(e)}")
 
     def _setup_styles(self):
         """Set up document styles."""

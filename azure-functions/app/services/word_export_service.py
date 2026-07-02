@@ -1,13 +1,15 @@
 import logging
 
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from io import BytesIO
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT, WD_COLOR_INDEX
 from docx.enum.style import WD_STYLE_TYPE
 from datetime import datetime
+
+from app.services.review_diff import diff_ops, filter_review_draft, review_units, removed_sections
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +34,7 @@ class WordExportService:
         try:
             # Review drafts: export only the banked (closed) sections once any have been closed.
             # If nothing is closed yet, fall back to exporting everything.
-            draft_data = self._filter_review_draft(draft_data)
+            draft_data = filter_review_draft(draft_data)
 
             doc = Document()
 
@@ -65,49 +67,6 @@ class WordExportService:
         except Exception as e:
             logger.error(f"Failed to export draft to Word: {e}")
             raise ValueError(f"Word export failed: {str(e)}")
-
-    def _filter_review_draft(self, draft_data: Dict[str, Any]) -> Dict[str, Any]:
-        """For review_mode drafts, keep only banked (review_step == 'closed') sections in the export.
-        A topic is kept if it is closed or has any closed subtopic; only closed subtopics are kept.
-        If no section is closed yet, the draft is returned unchanged (export everything)."""
-        metadata = draft_data.get('metadata') or {}
-        if not metadata.get('review_mode'):
-            return draft_data
-        toc = draft_data.get('toc') or []
-
-        def is_closed(unit):
-            return (unit or {}).get('review_step') == 'closed'
-
-        any_closed = any(
-            is_closed(t) or any(is_closed(s) for s in (t.get('subtopics') or []))
-            for t in toc
-        )
-        if not any_closed:
-            return draft_data
-
-        filtered = []
-        for t in toc:
-            closed_subs = [dict(s) for s in (t.get('subtopics') or []) if is_closed(s)]
-            if is_closed(t) or closed_subs:
-                kept = dict(t)
-                kept['subtopics'] = closed_subs
-                if not is_closed(t):
-                    # Kept only because a subtopic is banked — emit the heading, but never the
-                    # topic's own UN-REVIEWED body text.
-                    kept['content'] = ''
-                    kept['summary'] = ''
-                filtered.append(kept)
-
-        # Renumber sequentially: survivors kept their original numbers, so a filtered export
-        # showed gaps ("a lone 3.") that read as a corrupt document.
-        for i, t in enumerate(filtered, 1):
-            t['order'] = i
-            for j, s in enumerate(t['subtopics'], 1):
-                s['order'] = j
-
-        out = dict(draft_data)
-        out['toc'] = filtered
-        return out
 
     def _setup_styles(self, doc: Document):
         """Set up document styles."""
@@ -230,6 +189,153 @@ class WordExportService:
             # Add spacing between topics
             doc.add_paragraph()
     
+    # ===== Review-draft export variants: redline + changes overview =====
+    # (diff/flatten helpers shared with the PDF builder via app.services.review_diff)
+
+    def _add_redline_paragraph(self, doc: Document, old: str, new: str) -> None:
+        """One redline paragraph: additions highlighted green, removals red + strikethrough."""
+        p = doc.add_paragraph()
+        for op, text in diff_ops(old, new):
+            if not text:
+                continue
+            run = p.add_run(text + " ")
+            if op == "added":
+                run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+            elif op == "removed":
+                run.font.highlight_color = WD_COLOR_INDEX.RED
+                run.font.strike = True
+
+    def export_review_redline(self, draft_data: Dict[str, Any],
+                              original_data: Optional[Dict[str, Any]] = None) -> BytesIO:
+        """Redline .docx for a review draft: every section shows the frozen client baseline vs the
+        reviewed content — additions highlighted GREEN, removals RED + strikethrough. Sections the
+        review dropped are appended (fully struck)."""
+        try:
+            doc = Document()
+            self._setup_styles(doc)
+            self._add_title_page(doc, draft_data['metadata'])
+            doc.add_page_break()
+
+            doc.add_heading('Redline — changes vs the original policy', level=1)
+            legend = doc.add_paragraph()
+            r = legend.add_run("added text")
+            r.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+            legend.add_run("   ")
+            r = legend.add_run("removed text")
+            r.font.highlight_color = WD_COLOR_INDEX.RED
+            r.font.strike = True
+            doc.add_paragraph()
+
+            for u in review_units(draft_data):
+                h = doc.add_heading("", level=u["level"])
+                h.add_run(u["label"])
+                if u["added"]:
+                    tag = h.add_run("  (new section)")
+                    tag.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
+                if u["old"] == u["new"]:
+                    for para in u["new"].split("\n"):
+                        if para.strip():
+                            doc.add_paragraph(para.strip())
+                else:
+                    self._add_redline_paragraph(doc, u["old"], u["new"])
+
+            removed = removed_sections(draft_data, original_data)
+            if removed:
+                doc.add_page_break()
+                doc.add_heading('Removed sections', level=1)
+                for rm in removed:
+                    h = doc.add_heading("", level=2)
+                    r = h.add_run(rm["title"])
+                    r.font.highlight_color = WD_COLOR_INDEX.RED
+                    if rm["content"]:
+                        p = doc.add_paragraph()
+                        r = p.add_run(rm["content"])
+                        r.font.highlight_color = WD_COLOR_INDEX.RED
+                        r.font.strike = True
+
+            stream = BytesIO()
+            doc.save(stream)
+            stream.seek(0)
+            return stream
+        except Exception as e:
+            logger.error(f"Failed to export redline: {e}")
+            raise ValueError(f"Redline export failed: {str(e)}")
+
+    def export_changes_overview(self, draft_data: Dict[str, Any],
+                                original_data: Optional[Dict[str, Any]] = None) -> BytesIO:
+        """Changes-overview .docx for a review draft: per section Added / Modified / Unchanged with
+        word deltas, plus the removed-sections list — the at-a-glance companion to the redline."""
+        try:
+            GREEN, AMBER, RED, SLATE = RGBColor(0x15, 0x80, 0x3D), RGBColor(0xB4, 0x53, 0x09), \
+                RGBColor(0xB9, 0x1C, 0x1C), RGBColor(0x64, 0x74, 0x8B)
+            doc = Document()
+            self._setup_styles(doc)
+            meta = draft_data.get('metadata') or {}
+            title = doc.add_heading(f"{meta.get('title', 'Policy')} — Changes Overview", 0)
+            title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            doc.add_paragraph()
+
+            units = review_units(draft_data)
+            removed = removed_sections(draft_data, original_data)
+            rows = []
+            added_n = modified_n = unchanged_n = 0
+            for u in units:
+                if u["added"] or (not u["old"] and u["new"]):
+                    status = "Added"
+                    added_n += 1
+                elif u["old"] == u["new"]:
+                    status = "Unchanged"
+                    unchanged_n += 1
+                else:
+                    status = "Modified"
+                    modified_n += 1
+                ops = diff_ops(u["old"], u["new"]) if status == "Modified" else []
+                plus = sum(len(t.split()) for op, t in ops if op == "added")
+                minus = sum(len(t.split()) for op, t in ops if op == "removed")
+                rows.append((u, status, plus, minus))
+
+            summary = doc.add_paragraph()
+            summary.add_run(f"{len(units)} sections reviewed — ").bold = True
+            r = summary.add_run(f"{added_n} added")
+            r.font.color.rgb = GREEN
+            summary.add_run(", ")
+            r = summary.add_run(f"{modified_n} modified")
+            r.font.color.rgb = AMBER
+            summary.add_run(f", {unchanged_n} unchanged, ")
+            r = summary.add_run(f"{len(removed)} removed")
+            r.font.color.rgb = RED
+            doc.add_paragraph()
+
+            doc.add_heading('Section changes', level=1)
+            for u, status, plus, minus in rows:
+                p = doc.add_paragraph(style='List Bullet')
+                r = p.add_run(f"{u['label']} — ")
+                r.bold = True
+                r = p.add_run(status)
+                r.font.color.rgb = GREEN if status == "Added" else AMBER if status == "Modified" else SLATE
+                if status == "Modified":
+                    p.add_run(f"  (+{plus} / −{minus} words)")
+                elif status == "Added" and u["new"]:
+                    p.add_run(f"  ({len(u['new'].split())} words)")
+                if u.get("note"):
+                    r = p.add_run(f" — {u['note']}")
+                    r.italic = True
+
+            if removed:
+                doc.add_heading('Removed sections', level=1)
+                for rm in removed:
+                    p = doc.add_paragraph(style='List Bullet')
+                    r = p.add_run(rm["title"])
+                    r.font.color.rgb = RED
+
+            stream = BytesIO()
+            doc.save(stream)
+            stream.seek(0)
+            return stream
+        except Exception as e:
+            logger.error(f"Failed to export changes overview: {e}")
+            raise ValueError(f"Changes overview export failed: {str(e)}")
+
     def export_gap_summary(self, summary: Dict[str, Any], metadata: Dict[str, Any]) -> BytesIO:
         """Build a client-facing Gap Assessment Summary .docx from a GapSummary dict."""
         try:

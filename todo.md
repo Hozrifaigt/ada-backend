@@ -1,3 +1,67 @@
+# Feature update (2026-07-02) — variants × formats + format-aware preview
+1. **Shared module `review_diff.py`** (diff_ops/review_units/removed_sections/filter_review_draft) —
+   Word AND PDF builders use it; word_export_service's private copies removed.
+2. **PDF variants:** pdf_export_service gained `export_review_redline` + `export_changes_overview`
+   (reportlab inline markup: green backColor for additions, red backColor + <strike> for removals;
+   text XML-escaped). PDF **final policy now applies filter_review_draft** — closes the audit's
+   "PDF export leaks unreviewed sections" HIGH that was previously deprioritized.
+3. **Endpoints generalized:** `POST /{draft_id}/export/{redline|changes}/{fmt}` (fmt = word | pdf),
+   shared `_review_variant_response` helper; 400 on bad fmt / non-review drafts.
+4. **Frontend:** draftService exportRedline/exportChangesOverview take format; ExportReviewPanel now has
+   TWO choices — DOCUMENT (Final policy / Redline / Changes overview, review drafts) × FILE FORMAT
+   (Word / PDF); labels/filenames follow both. **Preview is variant-aware**: Redline → in-browser
+   word-level diff (wordDiff util, green/red spans, "(new section)" tags; removed-sections note),
+   Changes → counts + per-section status rows; Final → the original clean preview. New components
+   RedlineSpans/RedlinePreviewBody/ChangesPreviewBody in DraftEditPage.
+UNTESTED (no build/test in this env).
+
+# Feature (2026-07-02) — review-draft export variants + Export tab sizing
+1. **Redline .docx** (`export_review_redline` in word_export_service + `POST /{draft_id}/export/redline/word`):
+   per section, word-level diff (difflib) of frozen `baseline_content` vs `content` — additions
+   highlighted BRIGHT_GREEN, removals RED + strikethrough (WD_COLOR_INDEX); added sections tagged
+   "(new section)"; appendix of REMOVED sections (original snapshot units absent from the final TOC by
+   id AND normalized title, fully struck). Uses the UNFILTERED toc (documents the change set).
+2. **Changes overview .docx** (`export_changes_overview` + `POST /{draft_id}/export/changes/word`):
+   rollup counts + per-section Added/Modified(+x/−y words)/Unchanged bullets (reconcile_note italic)
+   + removed list. Both endpoints share `_review_export_prereqs` (404/400 gate: review drafts only;
+   original snapshot via storage.get_original_version, model_dump'd).
+3. **Frontend**: draftService `exportRedline`/`exportChangesOverview` (blob); ExportReviewPanel format
+   union +'redline'|'changes'; review drafts see 4 option cards (Final policy / Redline green /
+   Changes overview amber / PDF); export-button + preview-modal labels mapped.
+4. **Sizing**: ExportReviewPanel `isCompact` forced to true — the XL layout (h3/h4, p:3, 32px icons)
+   dwarfed the other tabs on large screens; dense variant is now the only variant.
+UNTESTED (no build/test in this env). Note: "Final policy" Word export keeps the closed-sections
+filter; redline/changes intentionally include every section.
+
+# UX (2026-07-02) — approve → jump to Review; benchmark step decluttered
+1. Approving the TOC now lands the reviewer on the Review tab: `onApproved` prop threaded
+   DraftEditPage → TocComparePanel (+ RedistributeButton "Save & approve") → parent reloads then
+   `setTabValue(4)`. `loadDraft`'s review-draft bounce to the TOC tab now fires on FIRST load only
+   (`reviewTabInitRef`) so reloads/apply/restore no longer yank the user back.
+2. ReviewPipelinePanel benchmark step decluttered: match picker + paste-text override live inside a
+   `Collapse` behind a single "Adjust match" text button (Tune icon); match status (Manual text /
+   Pinned / No benchmark matched) shows as one chip on the Run row; auto-opens when a run returns no
+   benchmark content. Default view = Run button → findings → continue → content.
+
+# UI polish pass revision (2026-07-02) — less text, more color
+Per user: REMOVED the "AI reconciliation note" line and the "Drag, edit and save…" explainer caption
+from TocComparePanel. Instead the three columns are differentiated visually: ColumnShell takes
+accent/headerTint/bodyTint — 3px accent top border + tinted header + faint body tint per column
+(Current = slate #64748b/#f1f5f9/#f8fafc, Benchmark = purple #764ba2/#f5f0fa/#fbf9fe, Good = indigo
+#667eea/#eef2ff/#f8f9ff). TocEditor's white cards sit on the tinted body. Workflow strip + "+N added"
+chip + dynamic benchmark subtitle kept.
+
+# UI polish pass (2026-07-02) — make the workflow visible
+Frontend only. (1) TocComparePanel: 4-step workflow strip (Attach benchmark → Build Good TOC → Map
+client content → Approve TOC) with done/current/upcoming states + a right-aligned hint; AI
+reconciliation note (metadata.toc_reconciliation_note) now displayed; Good column header shows a green
+"+N added" chip (topics+subtopics added from benchmark); Benchmark column subtitle reflects the actual
+source (library/uploaded/none). (2) ReviewPipelinePanel: green LinearProgress (closed/total) under the
+SECTIONS header; section rows now show the CURRENT pipeline step (benchmark/regulation/editing) in
+indigo for in-progress sections (provenance stays as the colored dot; label falls back to kept/added
+for untouched rows); legend explains the step label. New `WorkflowStep` mini-component + `STEP_SHORT`
+map. No behavior changes — display only.
+
 # Reconcile match evidence (2026-07-02) — snippet 400 → 1100 chars + middle sampling
 `_format_topics_for_reconcile` snippet raised to 1100 chars; long sections sampled head (70%) + a
 middle slice, because section openers are boilerplate and carried little distinguishing signal — the
