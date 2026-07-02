@@ -213,6 +213,12 @@ class SetBenchmarkContentRequest(BaseModel):
     subtopic_id: Optional[str] = Field(None, description="Target subtopic; when set the unit is the subtopic, not the topic")
 
 
+class SetBenchmarkMatchRequest(BaseModel):
+    """Request to pin/clear the benchmark section a Review-tab unit is matched against."""
+    match_name: str = Field(default="", description="Benchmark topic/subtopic title to pin; empty string clears the pin and reverts to auto-matching")
+    subtopic_id: Optional[str] = Field(None, description="Target subtopic; when set the unit is the subtopic, not the topic")
+
+
 class ApplyGapResponse(BaseModel):
     """Response after applying confirmed gap findings to a topic."""
     content: str
@@ -322,6 +328,7 @@ class TOCTopic(BaseModel):
     benchmark_match: Optional[str] = Field(None, description="Benchmark section this topic maps to (set at TOC reconciliation, reused by gap-report)")
     reconcile_note: Optional[str] = Field(None, description="Short rationale for a reconciliation merge/rename/add")
     manual_benchmark_content: Optional[str] = Field(None, description="Reviewer-supplied benchmark text to test this section against; when set it OVERRIDES the auto-matched benchmark for all benchmark paths")
+    manual_benchmark_match: Optional[str] = Field(None, description="Reviewer-pinned benchmark section title (picked in the Review tab); when set it overrides auto-matching (but not manual text)")
 
 
 class TOCSubtopic(BaseModel):
@@ -340,7 +347,9 @@ class TOCSubtopic(BaseModel):
     baseline_content: str = Field(default="", description="Frozen client baseline content for this section (review drafts); never overwritten by generation")
     review_step: str = Field(default="pending", description="Review pipeline step: pending | benchmark | regulation | review | closed")
     benchmark_match: Optional[str] = Field(None, description="Benchmark subtopic this subtopic maps to")
+    added_from_benchmark: bool = Field(default=False, description="True if this subtopic was added from the benchmark (not present in the client policy); drives the kept/added provenance label")
     manual_benchmark_content: Optional[str] = Field(None, description="Reviewer-supplied benchmark text to test this section against; when set it OVERRIDES the auto-matched benchmark for all benchmark paths")
+    manual_benchmark_match: Optional[str] = Field(None, description="Reviewer-pinned benchmark section title (picked in the Review tab); when set it overrides auto-matching (but not manual text)")
 
 
 class ConversationEntry(BaseModel):

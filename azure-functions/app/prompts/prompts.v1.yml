@@ -346,6 +346,10 @@ reconcile_toc:
   template: |
     You are a senior policy consultant deciding the final Table of Contents for a CLIENT POLICY REVIEW.
     You are reviewing the client's existing policy against a good-standard benchmark - NOT writing from scratch.
+    First understand the policy's PURPOSE from its title, function and industry, and the client's CURRENT
+    structure. Then produce the strongest Table of Contents for it: keep the client's sections, merge clear
+    overlaps into one, and ADD the benchmark sections that fill genuine gaps. The result should reflect the
+    client's policy improved toward the benchmark - not an unchanged copy, and not a rewrite from scratch.
 
     POLICY CONTEXT:
     Title: {title}
@@ -380,6 +384,20 @@ reconcile_toc:
        they are the SAME section. Output ONE entry for the pair with "source":"both", "client_match" set to
        that client topic's exact title, and "benchmark_match" set to the benchmark topic. Do NOT ALSO add
        the benchmark topic as a separate new section — that would duplicate a section the client already has.
+    1c. ADD WHAT'S MISSING; DON'T DUPLICATE WHAT'S THERE. This review must surface real gaps, so when a
+       benchmark topic covers something the client policy genuinely LACKS, ADD it as a new section
+       ("source":"benchmark"). Do NOT suppress genuinely-missing benchmark sections — a Good TOC that is an
+       exact copy of the client's is wrong when the benchmark covers more. BUT when a benchmark topic clearly
+       corresponds to an existing client section (same subject, even under a different title — use the
+       SIMILARITY HINTS), represent it EXACTLY ONCE as that client section ("source":"both", client_match set);
+       never output both a client entry and a separate benchmark entry for the same subject. Merging two
+       sections into one is fine — just make sure the merged subject appears once, never twice.
+    1d. SUBTOPICS: both lists show each topic's subtopics as indented "(subtopic)" bullets. When the
+       benchmark section a final topic maps to has subtopics that the client section LACKS, list those
+       missing benchmark subtopic titles (verbatim from the benchmark list) in that entry's "add_subtopics".
+       A "benchmark"-source added section automatically receives its own benchmark subtopics, so only use
+       "add_subtopics" there for extra subtopics taken from a DIFFERENT benchmark section. Never invent a
+       subtopic title that is not in the benchmark list, and never repeat a subtopic the client already has.
     2. CRITICAL — do NOT invent sections. Every final topic MUST come from the CLIENT POLICY TOPICS or the
        GOOD-STANDARD BENCHMARK TOPICS listed above. Reuse the EXACT title from one of those lists (you may
        lightly rename a CLIENT topic for clarity, but a "benchmark"/"both" topic's title must match a real
@@ -389,13 +407,14 @@ reconcile_toc:
        - "source": "client" (from the client policy), "benchmark" (added because the client lacked it), or "both" (a client topic that also maps to a benchmark section)
        - "client_match": the exact client topic title it is based on, or null
        - "benchmark_match": the exact benchmark topic title it maps to, or null
+       - "add_subtopics": missing benchmark subtopic titles to add under this topic (per rule 1d; else [])
        - "note": a SHORT rationale only when you merged, renamed, or added something (else "")
     4. Also judge the overall client policy: is it weak/light enough that a heavier rebuild would help?
 
     OUTPUT FORMAT - return ONLY valid JSON, no other text:
     {{
       "final_toc": [
-        {{"title": "...", "source": "client", "client_match": "...", "benchmark_match": null, "note": ""}}
+        {{"title": "...", "source": "client", "client_match": "...", "benchmark_match": null, "add_subtopics": [], "note": ""}}
       ],
       "assessment": {{"weak": false, "summary": "One sentence; if weak, say which areas and that Rebuild may help."}}
     }}

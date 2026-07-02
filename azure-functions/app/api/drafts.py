@@ -36,6 +36,7 @@ from app.models.draft_models import (
     ApplyGapResponse,
     AssessBatchRequest,
     SetBenchmarkContentRequest,
+    SetBenchmarkMatchRequest,
     GapSummary,
     ConsistencyReport,
     DraftVersion,
@@ -826,6 +827,38 @@ async def set_benchmark_content(
     When set it overrides auto-matching for that section; re-run the Benchmark step to use it."""
     logger.info(f"Set manual benchmark for draft {draft_id}, topic {topic_id} by user: {current_user.get('email')}")
     result = draft_service.set_manual_benchmark(draft_id, topic_id, request.content, request.subtopic_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
+    return result
+
+
+@router.get("/{draft_id}/benchmark-units")
+async def get_benchmark_units(
+    draft_id: str,
+    draft_service: DraftService = Depends(get_draft_service),
+    store = Depends(get_vector_store),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """The benchmark's topics + subtopics (titles + has_content), for the Review-tab picker
+    where the reviewer matches a section to a benchmark unit by hand."""
+    result = draft_service.list_benchmark_units(draft_id, store)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    return result
+
+
+@router.post("/{draft_id}/topics/{topic_id}/benchmark-match")
+async def set_benchmark_match(
+    draft_id: str,
+    topic_id: str,
+    request: SetBenchmarkMatchRequest,
+    draft_service: DraftService = Depends(get_draft_service),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Pin (or clear, when match_name is empty) the benchmark section a Review-tab unit is tested
+    against. A pin overrides auto-matching; re-run the Benchmark step to use it."""
+    logger.info(f"Set benchmark match for draft {draft_id}, topic {topic_id} by user: {current_user.get('email')}")
+    result = draft_service.set_manual_benchmark_match(draft_id, topic_id, request.match_name, request.subtopic_id)
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft or section not found")
     return result

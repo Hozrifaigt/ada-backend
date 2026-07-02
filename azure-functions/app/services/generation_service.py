@@ -709,7 +709,8 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
         return response.strip()
 
     def _format_topics_for_reconcile(self, topics: List[Dict[str, Any]], snippet_chars: int = 400) -> str:
-        """Format client/benchmark topics (title + short content snippet) for the reconcile prompt."""
+        """Format client/benchmark topics (title + short content snippet + subtopic titles) for the
+        reconcile prompt. Subtopics are shown so the LLM can propose missing ones via add_subtopics."""
         if not topics:
             return "(none)"
         lines = []
@@ -720,6 +721,16 @@ For example, if this is "Leaves" with subtopics "Annual Leave", "Sick Leave", "M
             content = (t.get("topic_content") or t.get("content") or "").strip()
             snippet = content[:snippet_chars].replace("\n", " ")
             lines.append(f"- {title}" + (f": {snippet}…" if snippet else ""))
+            subs = t.get("subtopics") or []
+            if isinstance(subs, str):
+                try:
+                    subs = json.loads(subs)
+                except Exception:
+                    subs = []
+            for s in subs:
+                st = (s if isinstance(s, str) else (s.get("name") or s.get("topic") or s.get("title") or "")).strip()
+                if st:
+                    lines.append(f"    - (subtopic) {st}")
         return "\n".join(lines) if lines else "(none)"
 
     def _assemble_full_policy_text(self, draft) -> str:

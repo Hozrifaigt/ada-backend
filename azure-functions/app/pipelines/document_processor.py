@@ -590,31 +590,33 @@ class DocumentProcessor:
         para_block_positions = [i for i, b in enumerate(blocks) if b["para"] is not None]
         start_block = para_block_positions[search_from] if search_from < len(para_block_positions) else len(blocks)
 
-        # Find the block index for each TOC entry title
+        # Locate each heading SEQUENTIALLY with a moving cursor, in TOC order. This is critical when
+        # subtopic titles repeat across topics ("Policy Objective", "Scope", ... under every topic): a
+        # fixed-start "first match" would map every "Policy Objective" to the FIRST one in the document,
+        # so later topics' subtopics never get their own position and all their content collapses onto the
+        # parent topic. Advancing the cursor past each match maps repeated titles to successive body
+        # occurrences, so each subtopic lands under its own parent. Prefer a heading-styled match; fall
+        # back to the nearest text-only match after the cursor.
+        cursor = start_block
         for entry in toc_entries:
             found_index = -1
-
-            # Pass 1: Look for a perfect match (text match + heading style)
-            for i in range(start_block, len(blocks)):
+            text_only = -1
+            for i in range(cursor, len(blocks)):
                 para = blocks[i]["para"]
                 if para is None:
                     continue
                 if self._text_matches_title(blocks[i]["text"], entry.title):
+                    if text_only == -1:
+                        text_only = i
                     is_heading, _, _ = self._is_heading(para)
                     if is_heading:
                         found_index = i
                         break
-
-            # Pass 2: If no perfect match, find the first text-only match
             if found_index == -1:
-                for i in range(start_block, len(blocks)):
-                    if blocks[i]["para"] is None:
-                        continue
-                    if self._text_matches_title(blocks[i]["text"], entry.title):
-                        found_index = i
-                        break
-
+                found_index = text_only
             entry.para_index = found_index if found_index != -1 else None
+            if found_index != -1:
+                cursor = found_index + 1
 
         # Filter and sort entries that were successfully located
         located_entries = sorted([e for e in toc_entries if e.para_index is not None],

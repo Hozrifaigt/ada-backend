@@ -1,3 +1,4 @@
+import re
 import uuid
 import json
 import asyncio
@@ -560,6 +561,55 @@ class DraftService:
             })
         return json.dumps(out)
 
+    @staticmethod
+    def _norm_title(s: Optional[str]) -> str:
+        """Normalize a section title for matching: lowercase, '&'->'and', drop leading numbering and
+        punctuation, collapse whitespace. Keeps the reconcile guards from rejecting a real
+        benchmark/client section over a cosmetic title difference."""
+        t = (s or "").strip().lower().replace("&", " and ")
+        t = re.sub(r"^[\d.\)\(\s:•-]+", "", t)  # leading numbering like "3.", "(a) ", "1.2 "
+        t = re.sub(r"[^a-z0-9\s]", " ", t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    @staticmethod
+    def _benchmark_subtopic_names(bt: Dict[str, Any]) -> List[str]:
+        """Subtopic titles of a benchmark topic dict, tolerant of the shapes the benchmark can arrive
+        in (DocumentProcessor, library index, snapshot, or plain strings)."""
+        subs = bt.get("subtopics") or []
+        if isinstance(subs, str):
+            try:
+                subs = json.loads(subs)
+            except Exception:
+                subs = []
+        out = []
+        for s in subs:
+            name = (s if isinstance(s, str) else (s.get("name") or s.get("topic") or s.get("title") or "")).strip()
+            if name:
+                out.append(name)
+        return out
+
+    def _append_added_subtopics(self, topic, names, allowed: Optional[set] = None) -> None:
+        """Append benchmark-sourced subtopics to `topic` (flagged added_from_benchmark), skipping ones
+        it already has (normalized-title match) and — when `allowed` is given — names that aren't real
+        benchmark sections (anti-hallucination)."""
+        from app.models.draft_models import TOCSubtopic
+        if isinstance(names, str):
+            names = [names]
+        have = {self._norm_title(s.topic) for s in topic.subtopics}
+        for raw in names or []:
+            name = (raw if isinstance(raw, str) else str(raw or "")).strip()
+            key = self._norm_title(name)
+            if not name or not key or key in have:
+                continue
+            if allowed is not None and key not in allowed:
+                logger.warning(f"Dropping added subtopic '{name}' for '{topic.topic}' — not a benchmark section")
+                continue
+            topic.subtopics.append(TOCSubtopic(
+                subtopic_id=str(uuid.uuid4()), topic=name, order=len(topic.subtopics) + 1,
+                added_from_benchmark=True, benchmark_match=name,
+            ))
+            have.add(key)
+
     def _transform_uploaded_doc_toc(self, topics: List[Dict[str, Any]]) -> List:
         """
         Transform DocumentProcessor output topics into draft TOCTopic models.
@@ -604,7 +654,7 @@ class DraftService:
             bt_name = (bt.get("topic") or bt.get("name") or "").strip()
             if bt_name and bt_name.lower() not in client_titles:
                 next_order += 1
-                toc.append(TOCTopic(
+                new_topic = TOCTopic(
                     topic_id=str(uuid.uuid4()),
                     topic=bt_name,
                     order=next_order,
@@ -615,7 +665,9 @@ class DraftService:
                     added_from_benchmark=True,
                     gap_status="pending",
                     benchmark_match=bt_name,
-                ))
+                )
+                self._append_added_subtopics(new_topic, self._benchmark_subtopic_names(bt))
+                toc.append(new_topic)
         return toc
 
     def _reconcile_vector_store(self):
@@ -646,40 +698,58 @@ class DraftService:
         # unchanged). Vectors are cached (self._embed) and reused by the dedup guardrail (C) below.
         vs = vector_store or self._reconcile_vector_store()
         client_vecs, bench_vecs = {}, {}
+        best_bench_of_client: Dict[str, Any] = {}  # client_key -> (bench_key, score); reused by the C guardrail
         similarity_hints = ""
+        MERGE_THRESHOLD = 0.82  # a MUTUAL best match this close = the same section (used by hints A + guardrail C)
         if vs is not None:
             try:
                 for t in client_toc:
-                    key = (t.topic or "").strip().lower()
+                    key = self._norm_title(t.topic)
                     if not key:
                         continue
                     v = self._embed(f"{t.topic}\n{(t.content or '')[:1500]}".strip(), vs)
                     if v:
                         client_vecs[key] = (t.topic, v)
                 for bt in benchmark_topics:
-                    name = (bt.get("topic") or bt.get("name") or "").strip()
+                    name = (bt.get("topic") or bt.get("name") or bt.get("title") or "").strip()
                     if not name:
                         continue
                     v = self._embed(f"{name}\n{(self._benchmark_topic_text(bt))[:1500]}".strip(), vs)
                     if v:
-                        bench_vecs[name.lower()] = (name, v)
-                # A: for each benchmark topic, the best-matching client topic above the hint threshold.
+                        bench_vecs[self._norm_title(name)] = (name, v)
+
+                def _nearest(vec, pool):
+                    """pool: iterable of (label, key, vector) → (key, label, score) of the closest."""
+                    best_k, best_l, best_s = None, None, 0.0
+                    for (label, key, pv) in pool:
+                        sc = self._cosine(vec, pv)
+                        if sc > best_s:
+                            best_k, best_l, best_s = key, label, sc
+                    return best_k, best_l, best_s
+
+                client_pool = [(title, ckey, v) for ckey, (title, v) in client_vecs.items()]
+                bench_pool = [(name, bkey, v) for bkey, (name, v) in bench_vecs.items()]
+                # Each client's nearest benchmark — for the MUTUAL-best test below.
+                for ckey, (ctitle, cvec) in client_vecs.items():
+                    bk, _, bs = _nearest(cvec, bench_pool)
+                    best_bench_of_client[ckey] = (bk, bs)
+                # A hints: only a MUTUAL best match (each is the other's nearest) at/above the threshold.
+                # One-directional "each benchmark → its best client" hinted almost every benchmark onto some
+                # client and suppressed ALL additions; requiring reciprocity means a genuinely-missing
+                # benchmark section (no reciprocal client) gets added instead of merged away.
                 hint_lines = []
-                for _, (bname, bvec) in bench_vecs.items():
-                    best_title, best_score = None, 0.0
-                    for (ctitle, cvec) in client_vecs.values():
-                        sc = self._cosine(bvec, cvec)
-                        if sc > best_score:
-                            best_title, best_score = ctitle, sc
-                    if best_title and best_score >= 0.75:
-                        hint_lines.append(f'- Benchmark "{bname}" == Client "{best_title}" (content similarity {best_score:.2f})')
+                for bname, bkey, bvec in bench_pool:
+                    ck, ctitle, cs = _nearest(bvec, client_pool)
+                    if ck and cs >= MERGE_THRESHOLD and best_bench_of_client.get(ck, (None,))[0] == bkey:
+                        hint_lines.append(f'- Benchmark "{bname}" == Client "{ctitle}" (content similarity {cs:.2f})')
                 similarity_hints = "\n".join(hint_lines)
             except Exception as e:
                 logger.warning(f"TOC similarity hints failed (non-fatal): {e}")
-                client_vecs, bench_vecs, similarity_hints = {}, {}, ""
+                client_vecs, bench_vecs, best_bench_of_client, similarity_hints = {}, {}, {}, ""
 
         try:
-            client_dicts = [{"topic": t.topic, "content": t.content} for t in client_toc]
+            client_dicts = [{"topic": t.topic, "content": t.content,
+                             "subtopics": [{"name": s.topic} for s in t.subtopics]} for t in client_toc]
             data = await self.generation_service.reconcile_toc(
                 client_topics=client_dicts,
                 benchmark_topics=benchmark_topics,
@@ -691,11 +761,26 @@ class DraftService:
             logger.warning(f"TOC reconciliation failed, falling back to naive union: {e}")
             return self._naive_benchmark_union(client_toc, benchmark_topics), None
 
-        client_by_title = {(t.topic or "").strip().lower(): t for t in client_toc}
-        bench_titles = {(bt.get("topic") or bt.get("name") or "").strip().lower()
-                        for bt in benchmark_topics if (bt.get("topic") or bt.get("name"))}
+        client_by_title = {}
+        for t in client_toc:
+            key = self._norm_title(t.topic)
+            if key:
+                client_by_title.setdefault(key, t)
+        # Allowed benchmark titles for the anti-hallucination guard: TOPIC and SUBTOPIC titles,
+        # normalized — an addition must exist in the benchmark, but a cosmetic rewording or a
+        # subtopic-level source must not get it dropped.
+        bench_by_title: Dict[str, Dict[str, Any]] = {}
+        bench_sub_titles: set = set()
+        for bt in benchmark_topics:
+            name = (bt.get("topic") or bt.get("name") or bt.get("title") or "").strip()
+            if name:
+                bench_by_title.setdefault(self._norm_title(name), bt)
+            for st in self._benchmark_subtopic_names(bt):
+                bench_sub_titles.add(self._norm_title(st))
+        bench_titles = set(bench_by_title) | bench_sub_titles
         final_toc: List = []
         used_client = set()
+        run_claims: Dict[str, Any] = {}  # benchmark key -> client topic the LLM mapped to it THIS run
         for entry in data.get("final_toc", []):
             title = (entry.get("title") or "").strip()
             if not title:
@@ -704,17 +789,24 @@ class DraftService:
             client_match = (entry.get("client_match") or "").strip()
             benchmark_match = (entry.get("benchmark_match") or "").strip() or None
             note = (entry.get("note") or "").strip() or None
-            cm_key = client_match.lower()
+            cm_key = self._norm_title(client_match)
             existing = client_by_title.get(cm_key)
-            if existing is not None and cm_key not in used_client:
-                # Reuse the client topic, preserving its content/subtopics; apply mapping + optional rename
-                used_client.add(cm_key)
+            if existing is not None and existing.topic_id not in used_client:
+                # Reuse the client topic, preserving its content/subtopics; apply mapping + optional rename.
+                # Track by stable topic_id (NOT title) — a "both" mapping renames existing.topic, and the
+                # safety loop below would otherwise re-add the same (renamed) client topic as a duplicate.
+                used_client.add(existing.topic_id)
                 if title and title != existing.topic:
                     existing.reconcile_note = note or f"Renamed from '{existing.topic}'"
                     existing.topic = title
                 else:
                     existing.reconcile_note = note
                 existing.benchmark_match = benchmark_match
+                if benchmark_match:
+                    run_claims.setdefault(self._norm_title(benchmark_match), existing)
+                # Benchmark subtopics this client section lacks (LLM-listed, guarded against the
+                # real benchmark titles).
+                self._append_added_subtopics(existing, entry.get("add_subtopics") or [], allowed=bench_titles)
                 final_toc.append(existing)
             elif source == "client":
                 # LLM claimed a client topic but its client_match didn't resolve (likely hallucinated);
@@ -724,12 +816,12 @@ class DraftService:
                 # Anti-hallucination: a benchmark/both topic must resolve to a real benchmark
                 # section (by benchmark_match or title) or an existing client section. Otherwise
                 # the LLM invented a section that's in neither document — drop it.
-                bm_key = (benchmark_match or "").strip().lower()
-                title_key = title.lower()
+                bm_key = self._norm_title(benchmark_match)
+                title_key = self._norm_title(title)
                 if bm_key not in bench_titles and title_key not in bench_titles and title_key not in client_by_title:
                     logger.warning(f"Dropping reconciled TOC entry '{title}' — not found in client or benchmark TOC")
                     continue
-                final_toc.append(TOCTopic(
+                new_topic = TOCTopic(
                     topic_id=str(uuid.uuid4()),
                     topic=title,
                     content="",
@@ -741,49 +833,80 @@ class DraftService:
                     benchmark_match=benchmark_match or title,
                     reconcile_note=note,
                     order=0,
-                ))
+                )
+                # An added benchmark section arrives with its own benchmark subtopics, not empty.
+                src_bt = bench_by_title.get(bm_key) or bench_by_title.get(title_key)
+                if src_bt is not None:
+                    self._append_added_subtopics(new_topic, self._benchmark_subtopic_names(src_bt))
+                self._append_added_subtopics(new_topic, entry.get("add_subtopics") or [], allowed=bench_titles)
+                final_toc.append(new_topic)
 
-        # Safety: in preserve mode never silently drop a client topic the LLM omitted.
+        # Safety: in preserve mode never silently drop a client topic the LLM omitted. Matched by stable
+        # topic_id so a reused-and-renamed client topic isn't re-added here as a duplicate.
         if review_intensity != "rebuild":
             for t in client_toc:
-                key = (t.topic or "").strip().lower()
-                if key and key not in used_client:
+                if t.topic_id not in used_client:
                     final_toc.append(t)
 
-        # C — deterministic semantic dedup guardrail. If the LLM still produced a benchmark-added topic
-        # that MEANS the same (by title+content embedding) as a kept client topic, merge it INTO that
-        # client topic (keep the client's title/content, record benchmark_match + a note) instead of
-        # leaving a duplicate. Only added->client merges; two client topics are never merged.
-        if vs is not None and bench_vecs:
-            kept_vecs = []
-            for ct in [t for t in final_toc if not getattr(t, "added_from_benchmark", False)]:
-                cv = client_vecs.get((ct.topic or "").strip().lower())
-                vec = cv[1] if cv else self._embed(f"{ct.topic}\n{(ct.content or '')[:1500]}".strip(), vs)
-                if vec:
-                    kept_vecs.append((ct, vec))
-            MERGE_THRESHOLD = 0.82  # conservative — auto-removes a benchmark section; err toward keeping both
-            survivors = []
-            for entry in final_toc:
-                if getattr(entry, "added_from_benchmark", False):
-                    bref = bench_vecs.get((entry.benchmark_match or entry.topic or "").strip().lower())
-                    if bref is not None:
-                        _, bvec = bref
-                        best_ct, best_score = None, 0.0
-                        for (ct, cvec) in kept_vecs:
-                            sc = self._cosine(bvec, cvec)
-                            if sc > best_score:
-                                best_ct, best_score = ct, sc
-                        if best_ct is not None and best_score >= MERGE_THRESHOLD:
-                            if not best_ct.benchmark_match:
-                                best_ct.benchmark_match = entry.benchmark_match or entry.topic
-                            note = f"Also covers benchmark: {entry.benchmark_match or entry.topic}"
-                            prev = (best_ct.reconcile_note or "").strip()
-                            best_ct.reconcile_note = (prev + "; " + note) if prev else note
-                            logger.info(f"Dedup-merged benchmark section '{entry.topic}' into client topic "
-                                        f"'{best_ct.topic}' (content similarity {best_score:.2f})")
-                            continue  # drop the duplicate benchmark-added topic
-                survivors.append(entry)
-            final_toc = survivors
+        # C — deterministic "keep, don't add" guardrail. Prefer the client's content-bearing section over
+        # an empty benchmark-added one. An added-from-benchmark topic is dropped and folded into a kept
+        # client topic when that client topic already covers it — either (a) it maps to the SAME benchmark
+        # section (exact benchmark_match; catches the many-to-one case where the LLM emitted a duplicate
+        # empty section), or (b) it MEANS the same thing (title+content embedding). Only added->client;
+        # client topics are never dropped, so no client content is ever lost.
+        kept = [t for t in final_toc if not getattr(t, "added_from_benchmark", False)]
+
+        def _fold(owner, added):
+            if not owner.benchmark_match:
+                owner.benchmark_match = added.benchmark_match or added.topic
+            note = f"Also covers benchmark: {added.benchmark_match or added.topic}"
+            prev = (owner.reconcile_note or "").strip()
+            owner.reconcile_note = (prev + "; " + note) if prev else note
+            # Fold the structure too: the added section's benchmark subtopics move to the owner.
+            self._append_added_subtopics(owner, [s.topic for s in added.subtopics])
+
+        # (a) benchmark sections a client topic was mapped to BY THIS reconcile run only. Persisted
+        # benchmark_match values (from an earlier reconcile or the gap pipeline) are deliberately NOT
+        # used: on regenerate they claimed nearly every benchmark section and folded away every
+        # genuine addition, leaving the Good TOC identical to the client's.
+        claimed: Dict[str, Any] = run_claims
+
+        # (b) uses the shared MERGE_THRESHOLD (0.82) from the hints block above — conservative, so the
+        # guardrail doesn't undo a legitimately-added benchmark section (only clear duplicates are merged).
+        kept_vecs = None  # computed lazily only if we need the semantic check
+        survivors = []
+        for entry in final_toc:
+            if getattr(entry, "added_from_benchmark", False):
+                bm_key = self._norm_title(entry.benchmark_match or entry.topic)
+                owner = claimed.get(bm_key)
+                if owner is not None:
+                    _fold(owner, entry)
+                    logger.info(f"Dropped added benchmark section '{entry.topic}' — already covered by "
+                                f"client topic '{owner.topic}'")
+                    continue
+                bref = bench_vecs.get(bm_key) if (vs is not None and bench_vecs) else None
+                if bref is not None:
+                    if kept_vecs is None:
+                        kept_vecs = []
+                        for ct in kept:
+                            cv = client_vecs.get(self._norm_title(ct.topic))
+                            vec = cv[1] if cv else self._embed(f"{ct.topic}\n{(ct.content or '')[:1500]}".strip(), vs)
+                            kept_vecs.append((ct, vec))
+                    _, bvec = bref
+                    best_ct, best_score = None, 0.0
+                    for (ct, cvec) in kept_vecs:
+                        if not cvec:
+                            continue
+                        sc = self._cosine(bvec, cvec)
+                        if sc > best_score:
+                            best_ct, best_score = ct, sc
+                    if best_ct is not None and best_score >= MERGE_THRESHOLD:
+                        _fold(best_ct, entry)
+                        logger.info(f"Dedup-merged benchmark section '{entry.topic}' into client topic "
+                                    f"'{best_ct.topic}' (content similarity {best_score:.2f})")
+                        continue
+            survivors.append(entry)
+        final_toc = survivors
 
         if not final_toc:
             return self._naive_benchmark_union(client_toc, benchmark_topics), None
@@ -1195,6 +1318,7 @@ class DraftService:
                         baseline_content=existing_subtopic.baseline_content if existing_subtopic else "",
                         review_step=existing_subtopic.review_step if existing_subtopic else "pending",
                         benchmark_match=existing_subtopic.benchmark_match if existing_subtopic else None,
+                        added_from_benchmark=existing_subtopic.added_from_benchmark if existing_subtopic else False,
                     )
                     subtopics.append(subtopic)
 
@@ -1759,18 +1883,29 @@ class DraftService:
         return dot / (na * nb) if na and nb else 0.0
 
     def _get_benchmark_topics(self, draft, vector_store) -> List[Dict[str, Any]]:
-        """Return the benchmark's per-topic content (uploaded JSON or the library policy)."""
+        """Return the benchmark's per-topic content (uploaded JSON or the library policy). Falls back
+        to the titles-only Extracted-TOC snapshot (benchmark set via the TOC tab's upload/paste) so
+        name resolution and the Review-tab benchmark picker still work — content is empty there."""
         meta = draft.metadata
         if getattr(meta, "benchmark_topics_json", None):
             try:
-                return json.loads(meta.benchmark_topics_json) or []
+                topics = json.loads(meta.benchmark_topics_json) or []
+                if topics:
+                    return topics
             except Exception:
-                return []
+                pass
         if getattr(meta, "benchmark_policy_id", None) and vector_store:
             try:
-                return vector_store.get_topics_by_policy(meta.benchmark_policy_id) or []
+                topics = vector_store.get_topics_by_policy(meta.benchmark_policy_id) or []
+                if topics:
+                    return topics
             except Exception as e:
                 logger.warning(f"Could not load benchmark topics for policy {meta.benchmark_policy_id}: {e}")
+        if getattr(meta, "benchmark_toc_json", None):
+            try:
+                return json.loads(meta.benchmark_toc_json) or []
+            except Exception:
+                pass
         return []
 
     def _benchmark_topic_text(self, bt: Dict[str, Any]) -> str:
@@ -1819,9 +1954,9 @@ class DraftService:
         (reusing stored vectors where available, else cached embeddings)."""
         if not benchmark_topics:
             return None
-        target = (client_title or "").strip().lower()
+        target = self._norm_title(client_title)
         for bt in benchmark_topics:
-            name = (bt.get("topic") or bt.get("name") or "").strip().lower()
+            name = self._norm_title(bt.get("topic") or bt.get("name") or bt.get("title"))
             if name and (name == target or name in target or target in name):
                 return bt
         if not vector_store:
@@ -1887,43 +2022,80 @@ class DraftService:
         return out
 
     def _best_benchmark_unit(self, query_title, query_content, benchmark_topics, vector_store, threshold: float = 0.78):
-        """Best-matching benchmark unit (topic OR subtopic) by TITLE + CONTENT embedding. Returns
-        (content, name), or (None, None) when nothing clears the confidence threshold — so an unrelated
-        benchmark section is never forced as a match (the 'matched Purpose & Objective for a procurement
-        section' bug)."""
+        """Best-matching benchmark unit (topic OR subtopic), layered so the strongest signal wins:
+        1) NORMALIZED exact title match (numbering/punctuation/&-vs-and insensitive);
+        2) TITLE + CONTENT embedding at `threshold` — meaning-based, catches renamed sections;
+        3) TITLE-only embedding at a stricter bar (0.86) — catches a same-named section whose client
+           content has drifted far from the benchmark's (content dragged the combined score down).
+        Returns (content, name), or (None, None) when nothing clears confidence — an unrelated
+        benchmark section is never forced as a match."""
         units = self._flatten_benchmark_units(benchmark_topics)
         if not units:
             return None, None
-        target = (query_title or "").strip().lower()
-        for u in units:  # exact title match wins immediately
-            if target and u["name"].strip().lower() == target:
+        target = self._norm_title(query_title)
+        for u in units:  # normalized exact title match wins immediately
+            if target and self._norm_title(u["name"]) == target:
                 return (u["content"] or None), u["name"]
         if not vector_store:
             return None, None
         q = self._embed(f"{query_title} {(query_content or '')[:800]}".strip(), vector_store)
-        if q is None:
+        qt = self._embed((query_title or "").strip(), vector_store)
+        if q is None and qt is None:
             return None, None
         best, best_score = None, 0.0
+        best_t, best_t_score = None, 0.0
         for u in units:
-            cand = self._embed(f"{u['name']} {(u['content'] or '')[:800]}".strip(), vector_store)
-            if cand is None:
-                continue
-            sc = self._cosine(q, cand)
-            if sc > best_score:
-                best, best_score = u, sc
+            if q is not None:
+                cand = self._embed(f"{u['name']} {(u['content'] or '')[:800]}".strip(), vector_store)
+                if cand is not None:
+                    sc = self._cosine(q, cand)
+                    if sc > best_score:
+                        best, best_score = u, sc
+            if qt is not None:
+                tcand = self._embed(u["name"], vector_store)
+                if tcand is not None:
+                    tsc = self._cosine(qt, tcand)
+                    if tsc > best_t_score:
+                        best_t, best_t_score = u, tsc
         if best is not None and best_score >= threshold:
             return (best["content"] or None), best["name"]
+        TITLE_ONLY_THRESHOLD = 0.86
+        if best_t is not None and best_t_score >= TITLE_ONLY_THRESHOLD:
+            return (best_t["content"] or None), best_t["name"]
+        return None, None
+
+    def _resolve_benchmark_unit_by_name(self, name: Optional[str], benchmark_topics) -> tuple:
+        """Find a benchmark unit (topic or subtopic) by NORMALIZED title — used to honor a pinned or
+        persisted benchmark_match without any similarity search. Returns (content, real_name) or (None, None)."""
+        key = self._norm_title(name)
+        if not key:
+            return None, None
+        for u in self._flatten_benchmark_units(benchmark_topics):
+            if self._norm_title(u["name"]) == key:
+                return (u["content"] or None), u["name"]
         return None, None
 
     def _benchmark_content_for_unit(self, topic, subtopic, benchmark_topics, vector_store):
-        """Return (benchmark_content, benchmark_name) for a gap unit, matched by TITLE + CONTENT across
-        the whole benchmark tree (topics + subtopics), confidence-gated."""
-        # Reviewer override: if this unit has manually-supplied benchmark text, use it verbatim and
-        # skip auto-matching entirely (works whether or not a benchmark topic would have matched).
+        """Return (benchmark_content, benchmark_name) for a gap unit. Resolution order:
+        1. manual benchmark TEXT (reviewer-pasted) — used verbatim;
+        2. PINNED benchmark section (reviewer picked it in the Review tab) — resolved by title, no similarity;
+        3. the unit's persisted benchmark_match (TOC reconciliation / a previous run) — trusted before search;
+        4. auto-match by TITLE + CONTENT across the whole benchmark tree, confidence-gated."""
         unit = subtopic or topic
         manual = (getattr(unit, "manual_benchmark_content", None) or "").strip()
         if manual:
             return manual, "Manual benchmark"
+        pinned = (getattr(unit, "manual_benchmark_match", None) or "").strip()
+        if pinned:
+            content, name = self._resolve_benchmark_unit_by_name(pinned, benchmark_topics)
+            if name:
+                return content, name
+            logger.warning(f"Pinned benchmark section '{pinned}' not found in the benchmark — auto-matching instead")
+        mapped = (getattr(unit, "benchmark_match", None) or "").strip()
+        if mapped and mapped != "Manual benchmark":
+            content, name = self._resolve_benchmark_unit_by_name(mapped, benchmark_topics)
+            if content:
+                return content, name
         # Leaf top-level section → search the whole benchmark tree by title+content (handles renamed /
         # flattened sections like "High-Level TEC Procurement" → benchmark's nested "Procurement Governance").
         if subtopic is None and not getattr(topic, "subtopics", None):
@@ -1978,6 +2150,9 @@ class DraftService:
                 return None
         text = (content or "").strip()
         unit.manual_benchmark_content = text or None
+        if text:
+            # Manual text supersedes a pinned section — only one override active at a time.
+            unit.manual_benchmark_match = None
         draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
         self.storage.update_draft(draft_id, draft)
         return {
@@ -1987,10 +2162,63 @@ class DraftService:
             "message": "Manual benchmark saved" if text else "Manual benchmark cleared",
         }
 
+    def set_manual_benchmark_match(self, draft_id: str, topic_id: str, match_name: str,
+                                   subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Pin (or clear, when match_name is blank) the benchmark section a Review-tab unit is tested
+        against. A pin overrides auto-matching; picking one clears any manual-text override."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        topic = next((t for t in draft.toc if t.topic_id == topic_id), None)
+        if not topic:
+            return None
+        unit = topic
+        if subtopic_id:
+            unit = next((s for s in topic.subtopics if s.subtopic_id == subtopic_id), None)
+            if not unit:
+                return None
+        name = (match_name or "").strip()
+        unit.manual_benchmark_match = name or None
+        if name:
+            unit.manual_benchmark_content = None
+        else:
+            # Clearing the pin means "auto-match again" — drop the persisted match too, otherwise the
+            # previously-pinned name (copied into benchmark_match on assess) would stay sticky.
+            unit.benchmark_match = None
+        draft.metadata.modified_at = datetime.now(timezone.utc).isoformat()
+        self.storage.update_draft(draft_id, draft)
+        return {
+            "topic_id": topic_id,
+            "subtopic_id": subtopic_id,
+            "manual_benchmark_match": name or None,
+            "message": "Benchmark match pinned" if name else "Benchmark match cleared",
+        }
+
+    def list_benchmark_units(self, draft_id: str, vector_store) -> Optional[Dict[str, Any]]:
+        """The benchmark's topics + subtopics (titles + whether each has content), for the Review-tab
+        picker where the reviewer matches a section to a benchmark unit by hand."""
+        draft = self.storage.get_draft(draft_id)
+        if not draft:
+            return None
+        units: List[Dict[str, Any]] = []
+        for bt in self._get_benchmark_topics(draft, vector_store) or []:
+            name = (bt.get("topic") or bt.get("name") or bt.get("title") or "").strip()
+            if name:
+                units.append({"name": name, "level": "topic", "parent": None,
+                              "has_content": bool((bt.get("topic_content") or bt.get("content") or "").strip())})
+            for s in self._benchmark_subtopics(bt):
+                sname = (s.get("name") or s.get("topic") or s.get("title") or "").strip() if isinstance(s, dict) else str(s).strip()
+                if sname:
+                    scontent = (s.get("content") or s.get("topic_content") or "").strip() if isinstance(s, dict) else ""
+                    units.append({"name": sname, "level": "subtopic", "parent": name or None,
+                                  "has_content": bool(scontent)})
+        return {"units": units}
+
     def get_benchmark_content_for_unit(self, draft_id: str, topic_id: str, vector_store,
                                        subtopic_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Return the benchmark text currently used for a section + its source, so the reviewer can
-        view/edit it. source: 'manual' (override set) | 'matched' (auto) | 'none' (nothing matched)."""
+        view/edit it. source: 'manual' (text override) | 'pinned' (reviewer-picked section) |
+        'matched' (auto) | 'none' (nothing matched)."""
         draft = self.storage.get_draft(draft_id)
         if not draft:
             return None
@@ -2008,7 +2236,9 @@ class DraftService:
             return {"content": manual, "name": "Manual benchmark", "source": "manual"}
         benchmark_topics = self._get_benchmark_topics(draft, vector_store)
         content, name = self._benchmark_content_for_unit(topic, subtopic, benchmark_topics, vector_store)
-        return {"content": content or "", "name": name, "source": "matched" if content else "none"}
+        pinned = (getattr(unit, "manual_benchmark_match", None) or "").strip()
+        source = "none" if not name else ("pinned" if pinned and self._norm_title(pinned) == self._norm_title(name) else "matched")
+        return {"content": content or "", "name": name, "source": source}
 
     def _surrounding_context_for_unit(self, topic, subtopic, draft=None) -> str:
         """Read-only context so a unit isn't assessed in isolation: parent intro + sibling subsections
@@ -2354,6 +2584,7 @@ class DraftService:
                     baseline_content=(smatch.baseline_content if smatch else ""),
                     review_step=(smatch.review_step if smatch else "pending"),
                     benchmark_match=(smatch.benchmark_match if smatch else None),
+                    added_from_benchmark=(smatch.added_from_benchmark if smatch else False),
                 ))
             new_models.append(TOCTopic(
                 topic_id=(match.topic_id if match else str(uuid.uuid4())),
@@ -2574,16 +2805,20 @@ class DraftService:
         # Target = the current Good TOC (topics + subtopics, tagged with level + current content).
         good: List[Dict[str, Any]] = []
         for t in draft.toc:
-            good.append({"topic_id": t.topic_id, "subtopic_id": None, "title": t.topic, "level": "topic", "content": t.content or ""})
+            good.append({"topic_id": t.topic_id, "subtopic_id": None, "title": t.topic, "level": "topic",
+                         "content": t.content or "", "added": bool(getattr(t, "added_from_benchmark", False))})
             for s in t.subtopics:
-                good.append({"topic_id": t.topic_id, "subtopic_id": s.subtopic_id, "title": s.topic, "level": "subtopic", "content": s.content or ""})
+                good.append({"topic_id": t.topic_id, "subtopic_id": s.subtopic_id, "title": s.topic, "level": "subtopic",
+                             "content": s.content or "", "added": bool(getattr(s, "added_from_benchmark", False))})
 
         # Target descriptors (a stable key per Good section). current_content lets the editor reopen
-        # without re-seeding over edits the reviewer already saved.
+        # without re-seeding over edits the reviewer already saved. added_from_benchmark drives the
+        # kept/added label so a client-origin section isn't mislabeled "added" just because no separate
+        # content source mapped to it (e.g. a topic whose content lives in its subtopics).
         targets_out = [
             {"key": f"{g['topic_id']}|{g['subtopic_id'] or ''}", "topic_id": g["topic_id"],
              "subtopic_id": g["subtopic_id"], "title": g["title"], "level": g["level"],
-             "current_content": g.get("content", "")}
+             "current_content": g.get("content", ""), "added_from_benchmark": g.get("added", False)}
             for g in good
         ]
 
@@ -2933,16 +3168,26 @@ class DraftService:
         unit.gap_status = "assessed"
         if unit.review_step == "pending":
             unit.review_step = "benchmark"
-        if subtopic is not None and benchmark_name:
-            subtopic.benchmark_match = benchmark_name
+        # Persist the resolved match (topics AND subtopics) so it's stable across re-runs and visible
+        # in the picker. "Manual benchmark" is a pseudo-name for pasted text — never persisted as a match.
+        if benchmark_name and benchmark_name != "Manual benchmark":
+            unit.benchmark_match = benchmark_name
         self.storage.update_draft(draft_id, draft)
 
+        pinned = (getattr(unit, "manual_benchmark_match", None) or "").strip()
+        benchmark_source = (
+            "manual" if benchmark_name == "Manual benchmark"
+            else "none" if not benchmark_name
+            else "pinned" if pinned and self._norm_title(pinned) == self._norm_title(benchmark_name)
+            else "matched"
+        )
         return {
             "topic_id": topic_id,
             "subtopic_id": subtopic_id,
             "baseline_content": current,
             "benchmark_content": benchmark_content or "",
             "benchmark_match": benchmark_name,
+            "benchmark_source": benchmark_source,
             "findings": [f.model_dump() for f in report.findings],
             "as_is_suggestion": as_is,
             "message": "Benchmark gap assessment generated",
