@@ -1,3 +1,18 @@
+# Reconcile match evidence (2026-07-02) — snippet 400 → 1100 chars + middle sampling
+`_format_topics_for_reconcile` snippet raised to 1100 chars; long sections sampled head (70%) + a
+middle slice, because section openers are boilerplate and carried little distinguishing signal — the
+main cause of same/different mis-judgements in reconcile. Token cost ≈ +6-7k per reconcile call (runs
+once per upload/regenerate). Embedding texts (title+content[:1500] in _build_reconciled_toc /
+_best_benchmark_unit) unchanged — candidate follow-up if matching still misfires.
+
+# UX (2026-07-02) — benchmark source choice made explicit on NewDraftPage
+The Benchmark Policy card used a Switch whose label showed the CURRENT mode ("Upload a file" /
+"Browse from library"), so users couldn't tell what flipping it would do. Replaced with an explicit
+two-option ToggleButtonGroup ("Upload a file" | "Choose from library") ABOVE the input, matching the
+Rewrite-intensity pattern on the same card; header caption now explains both options. Same
+state/clearing behavior (switching modes clears the other mode's selection). Switch/FormControlLabel
+imports left in place (possible other usages; grep unavailable in this env).
+
 # Pre-production fixes — audit round 2 MEDIUM issues (2026-07-02)
 1. **Stale finding ids fail loudly:** `apply_gap_for_topic` raises ValueError when confirmed ids match
    nothing in the stored report (ids regenerate every assess); endpoint → 409; ReviewPipelinePanel
