@@ -1,5 +1,7 @@
 import uuid
 import json
+import math
+import hashlib
 import logging
 
 from typing import List, Dict, Any, Optional
@@ -13,6 +15,20 @@ from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import AzureError
 
 logger = logging.getLogger(__name__)
+
+# Regulation-chunk embedding cache for the rerank step in search_relevant_regulations.
+# Regulation text is static, so content-hash keys stay valid; bounded FIFO.
+_REG_RERANK_EMBED_CACHE: Dict[str, List[float]] = {}
+_REG_RERANK_EMBED_CACHE_MAX = 2048
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
 
 
 @dataclass
@@ -383,9 +399,12 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
                 # Parse subtopics JSON
                 subtopics = json.loads(result.get("subtopics", "[]"))
 
-                # Get the actual similarity score from Azure Search
-                # Azure returns scores as @search.score, which is accessible as a property
-                similarity_score = result.get('@search.score', 0.0)
+                # Azure @search.score for cosine = 1 / (2 - cosine_similarity); invert back so
+                # the caller's threshold is a true cosine (same conversion as
+                # search_similar_policies — comparing the raw score against a cosine threshold
+                # silently shifted the cutoff, e.g. raw 0.7 is really cosine ≈ 0.57).
+                azure_score = result.get('@search.score', 0.0)
+                similarity_score = 2 - (1 / azure_score) if azure_score > 0 else -1.0
 
                 if similarity_score >= threshold:
                     processed_results.append({
@@ -692,50 +711,78 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
         context: Optional[Dict[str, Any]] = None
     ) -> List[RegulationChunk]:
         """
-        Search for relevant regulation chunks using simple keyword search.
+        Search for relevant regulation chunks: hybrid retrieval + cosine rerank.
+
+        Retrieval is hybrid (BM25 over topics/content + vector over content_vector) over a
+        WIDE candidate pool, then candidates are reranked by true cosine similarity between
+        the query and the chunk content. The rerank exists because Azure's hybrid score is an
+        RRF fusion value (~0.01-0.06 range) that is meaningless as a relevance threshold —
+        min_score (default settings.REGULATION_SEARCH_MIN_SCORE) is applied to the cosine.
 
         Args:
             query_text: The search query
-            regulation_name: Optional filter by regulation category
+            regulation_name: Filter to this regulation_category (falls back to unfiltered
+                when the category doesn't match anything, so a free-text name can't zero out results)
             top_k: Number of results to return
-            min_score: Minimum similarity score threshold (not used, kept for compatibility)
+            min_score: Minimum COSINE similarity for a chunk to be included
             context: Additional context (not used, kept for compatibility)
 
         Returns:
-            List of RegulationChunk objects with relevance scores
+            List of RegulationChunk objects, best first, score = cosine similarity
         """
         if top_k is None:
             top_k = settings.REGULATION_SEARCH_TOP_K
+        if min_score is None:
+            min_score = settings.REGULATION_SEARCH_MIN_SCORE
 
         try:
-            logger.info(f"Searching regulations for: {query_text}")
+            logger.info(f"Searching regulations for: {query_text} (category={regulation_name or 'any'})")
 
             # Generate embedding for semantic search
             query_vector = self.embedder.embed_query(query_text)
 
             from azure.search.documents.models import VectorizedQuery
 
+            # Wide candidate pool: the cosine rerank below picks the final top_k.
+            pool_k = max(top_k * 3, 15)
             vector_query = VectorizedQuery(
                 vector=query_vector,
-                k_nearest_neighbors=top_k,
+                k_nearest_neighbors=pool_k,
                 fields="content_vector"
             )
 
-            # Hybrid search: BM25 (keywords) + Vector (semantic)
-            results = self.regulations_client.search(
-                search_text=query_text,
-                search_fields=["topics", "content"],  # BM25 searches these
-                vector_queries=[vector_query],  # Vector searches content_vector
-                select="id,content,regulation_category,decree_name,article_number,regulation_type,effective_date,topics",
-                top=top_k
-            )
+            select_fields = ("id,content,regulation_category,decree_name,article_number,"
+                             "regulation_type,effective_date,topics")
 
-            # Process results - Azure combines BM25 + vector scores
-            processed_results = []
+            def _run_search(filter_expr: Optional[str]) -> List[Dict[str, Any]]:
+                return list(self.regulations_client.search(
+                    search_text=query_text,
+                    search_fields=["topics", "content"],  # BM25 searches these
+                    vector_queries=[vector_query],  # Vector searches content_vector
+                    filter=filter_expr,
+                    select=select_fields,
+                    top=pool_k
+                ))
+
+            # Scope to the draft's regulation when given — previously this parameter was
+            # silently ignored and chunks from ANY indexed regulation could be returned.
+            results: List[Dict[str, Any]] = []
+            if regulation_name and regulation_name.strip():
+                safe_name = regulation_name.strip().replace("'", "''")
+                try:
+                    results = _run_search(f"regulation_category eq '{safe_name}'")
+                except Exception as filter_err:
+                    logger.warning(f"Filtered regulation search failed ({filter_err}), retrying unfiltered")
+                    results = []
+                if not results:
+                    logger.info(f"No chunks in category '{regulation_name}', falling back to all regulations")
+                    results = _run_search(None)
+            else:
+                results = _run_search(None)
+
+            candidates = []
             for result in results:
-                score = result.get('@search.score', 0.0)
-
-                chunk = RegulationChunk(
+                candidates.append(RegulationChunk(
                     id=result["id"],
                     content=result["content"],
                     regulation_category=result["regulation_category"],
@@ -744,11 +791,36 @@ Example format: ["synonym1", "synonym2", "synonym3", "synonym4", "synonym5"]"""
                     regulation_type=result["regulation_type"],
                     effective_date=result.get("effective_date"),
                     topics=result.get("topics", []),
-                    score=score
-                )
-                processed_results.append(chunk)
+                    score=result.get('@search.score', 0.0)
+                ))
 
-            logger.info(f"Found {len(processed_results)} regulation chunks (hybrid BM25 + vector)")
+            # Cosine rerank + threshold. Non-fatal: on embedding failure keep hybrid order
+            # (RRF scores) and skip the min_score gate rather than dropping everything.
+            try:
+                to_embed, embed_keys = [], []
+                for c in candidates:
+                    key = hashlib.md5(c.content.encode("utf-8")).hexdigest()
+                    embed_keys.append(key)
+                    if key not in _REG_RERANK_EMBED_CACHE:
+                        to_embed.append((key, c.content))
+                if to_embed:
+                    vecs = self.embedder.embed_documents([t for _, t in to_embed])
+                    for (key, _), vec in zip(to_embed, vecs):
+                        while len(_REG_RERANK_EMBED_CACHE) >= _REG_RERANK_EMBED_CACHE_MAX:
+                            _REG_RERANK_EMBED_CACHE.pop(next(iter(_REG_RERANK_EMBED_CACHE)))
+                        _REG_RERANK_EMBED_CACHE[key] = vec
+                for c, key in zip(candidates, embed_keys):
+                    c.score = _cosine(query_vector, _REG_RERANK_EMBED_CACHE.get(key, []))
+                candidates.sort(key=lambda c: c.score, reverse=True)
+                processed_results = [c for c in candidates if c.score >= min_score][:top_k]
+                logger.info(
+                    f"Regulation search: {len(candidates)} candidates → {len(processed_results)} "
+                    f"above cosine {min_score} (best={candidates[0].score:.3f})" if candidates
+                    else "Regulation search: no candidates"
+                )
+            except Exception as rerank_err:
+                logger.warning(f"Cosine rerank failed ({rerank_err}), keeping hybrid order without threshold")
+                processed_results = candidates[:top_k]
 
             return processed_results
 

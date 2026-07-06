@@ -22,6 +22,7 @@ class ReflectionCritique:
     recommendations: str
     requires_revision: bool
     fixed_content: Optional[str] = None  # Auto-fixed content if revision was performed
+    critique_failed: bool = False  # True when the critique itself errored — scores are meaningless
 
 
 class ReflectionAgent:
@@ -101,7 +102,9 @@ class ReflectionAgent:
 
         except Exception as e:
             logger.error(f"Error in reflection agent critique: {e}")
-            # Return a default critique on error
+            # A FAILED critique must not trigger an auto-rewrite: the zero scores and
+            # "Critique failed" weakness are not real feedback, and regenerating from them
+            # degrades the content. Keep the original and flag the failure.
             return ReflectionCritique(
                 score=0.0,
                 strengths=[],
@@ -111,7 +114,8 @@ class ReflectionAgent:
                 alignment_score=0.0,
                 regulation_compliance_score=0.0,
                 recommendations="Unable to perform critique. Please review manually.",
-                requires_revision=True
+                requires_revision=False,
+                critique_failed=True
             )
 
     def _build_critique_context(
@@ -190,11 +194,18 @@ class ReflectionAgent:
         sections.append("")
         
         # Section 5: Conversation History
+        # Entries arrive as ConversationEntry models (from the draft TOC) or dicts; the keys are
+        # user_message/ai_response. The old dict-only .get('user_prompt') access crashed on models
+        # (AttributeError), which made EVERY critique on a topic with history fail → forced a
+        # regeneration driven by a meaningless "Critique failed" critique.
         sections.append("=== CONVERSATION HISTORY ===")
         if conversation_history:
             for i, msg in enumerate(conversation_history[-5:], 1):  # Last 5 messages
-                sections.append(f"[{i}] User: {msg.get('user_prompt', 'N/A')[:200]}")
-                sections.append(f"    Response: {msg.get('response', 'N/A')[:200]}...")
+                entry = msg.model_dump() if hasattr(msg, 'model_dump') else (msg or {})
+                user_msg = entry.get('user_message') or 'N/A'
+                ai_response = entry.get('ai_response') or 'N/A'
+                sections.append(f"[{i}] User: {user_msg[:200]}")
+                sections.append(f"    Response: {ai_response[:200]}...")
         else:
             sections.append("No previous conversation")
         sections.append("")
@@ -212,10 +223,17 @@ class ReflectionAgent:
             sections.append("No regulations provided")
         sections.append("")
         
-        # Section 7: Generated Content
+        # Section 7: Generated Content — the critic must see what it's judging. The old
+        # 1000-char preview meant compliance/quality scores were based on ~the first two
+        # paragraphs only. Cap generously; note the truncation when it happens.
+        content_cap = 12000
         sections.append("=== GENERATED CONTENT ===")
         sections.append(f"Length: {len(generated_content)} characters")
-        sections.append(f"Content Preview:\n{generated_content[:1000]}...")
+        if len(generated_content) <= content_cap:
+            sections.append(f"Content:\n{generated_content}")
+        else:
+            sections.append(f"Content (truncated at {content_cap} of {len(generated_content)} chars):\n"
+                            f"{generated_content[:content_cap]}...")
         sections.append("")
         
         # Section 8: Sources Used
@@ -297,10 +315,19 @@ Return ONLY valid JSON, no additional text."""
 
         try:
             response = await self.llm_service.generate(prompt)
-            
-            # Parse JSON response
-            critique_json = json.loads(response)
-            
+
+            # Parse JSON response, tolerating markdown fences / surrounding prose
+            # (strict json.loads failed on ```json fences, turning good critiques into errors).
+            text = (response or "").strip()
+            try:
+                critique_json = json.loads(text)
+            except json.JSONDecodeError:
+                start = text.find("{")
+                end = text.rfind("}")
+                if start == -1 or end <= start:
+                    raise
+                critique_json = json.loads(text[start:end + 1])
+
             return ReflectionCritique(
                 score=float(critique_json.get("score", 0.0)),
                 alignment_score=float(critique_json.get("alignment_score", 0.0)),
@@ -410,6 +437,12 @@ Return ONLY valid JSON, no additional text."""
                 f"Alignment: {critique.alignment_score:.2f}, "
                 f"Regulation Compliance: {critique.regulation_compliance_score:.2f}"
             )
+
+            # A failed critique carries no usable feedback — keep the original content
+            # rather than rewriting it from "Critique failed" noise.
+            if critique.critique_failed:
+                logger.warning("Critique failed; skipping auto-fix and keeping original content")
+                return critique
 
             # Step 2: Check if revision is needed
             # Regulation compliance is the highest priority

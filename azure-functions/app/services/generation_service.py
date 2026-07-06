@@ -133,11 +133,13 @@ class ContentGenerationService:
                 topic_title = toc_item.topic
                 source_id = toc_item.source_topic_id
 
-            # # Step 5: Get conversation history for generation - last 3 legitimate only
-            # generation_history = self._get_conversation_history(
-            #     draft, topic_id, subtopic_id, limit=3, for_llm_context=True
-            # )
-            # formatted_generation_history = self._format_conversation_history_for_prompt(generation_history)
+            # Step 5: Get conversation history for generation - last 3 legitimate only.
+            # Without it the model can't honor follow-ups like "shorten what you just wrote";
+            # the prompts have a conversation_history slot but were being passed "".
+            generation_history = self._get_conversation_history(
+                draft, topic_id, subtopic_id, limit=3, for_llm_context=True
+            )
+            formatted_generation_history = self._format_conversation_history_for_prompt(generation_history)
 
             # # Step 6: Try to retrieve existing content if source_id exists
             # if source_id:
@@ -206,7 +208,7 @@ class ContentGenerationService:
                     draft=draft,
                     topic_id=topic_id,
                     subtopic_id=subtopic_id,
-                    conversation_history="",
+                    conversation_history=formatted_generation_history,
                     llm_service=llm_service,
                     regulation_chunks=regulation_chunks
                 )
@@ -216,7 +218,7 @@ class ContentGenerationService:
                     user_prompt=user_prompt,
                     sequential_context=sequential_context,
                     draft_metadata=draft.metadata,
-                    conversation_history="",
+                    conversation_history=formatted_generation_history,
                     llm_service=llm_service,
                     full_toc=full_toc,
                     regulation_chunks=regulation_chunks,

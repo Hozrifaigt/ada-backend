@@ -1,3 +1,37 @@
+# Accuracy audit (2026-07-06) — retrieval + generation logic bugs
+Full-pipeline review of retrieval/generation accuracy (vector_store, generation_service,
+reflection_agent, query_classification, draft_service matching). draft_service's benchmark-matching
+layer was left alone (already hardened in the 2026-07-02 audit rounds). Four defects fixed:
+1. **vector_store.search_relevant_regulations ignored `regulation_name` AND `min_score`** — every
+   regulation search ran unfiltered across ALL indexed regulations, and no relevance floor was
+   applied (the configured 0.55 could never work: Azure hybrid returns RRF scores ~0.01-0.06).
+   Now: category filter with unfiltered fallback (so a non-matching free-text name can't zero out
+   results) + wide hybrid candidate pool (top_k*3) + true-cosine rerank (batch-embedded, bounded
+   module cache `_REG_RERANK_EMBED_CACHE`) + min_score applied to the cosine; chunk.score is now a
+   real cosine. Rerank failure degrades to hybrid order (non-fatal).
+2. **vector_store.search_similar_topics compared raw Azure score to a cosine threshold** — raw 0.7
+   is really cosine ≈0.57, so weak matches passed. Now inverts (2 − 1/score), same as
+   search_similar_policies.
+3. **reflection_agent: every critique on a topic with conversation history CRASHED** —
+   `msg.get('user_prompt')` on ConversationEntry models (AttributeError) → default score-0.0
+   "Critique failed" critique with requires_revision=True → content force-regenerated from
+   meaningless feedback. Fixed keys (user_message/ai_response) + model_dump-or-dict normalization.
+   Plus: critic saw only the FIRST 1000 chars of the content it judged (now up to 12k, truncation
+   noted); strict json.loads failed on ```json fences (now fence-tolerant like _parse_json_object);
+   a FAILED critique no longer triggers auto-fix (new `critique_failed` flag; requires_revision
+   False on error) — the original content is kept instead of being rewritten from noise.
+4. **generation_service: conversation history never reached the generators** — computed for
+   classification but both _adapt_existing_content and _generate_from_scratch got "" (Step 5 was
+   commented out), so follow-ups like "make it shorter" had no memory of prior turns. Re-enabled
+   (last 3 legitimate entries, existing filter).
+## Review
+Files: app/pipelines/components/vector_store.py, app/services/reflection_agent.py,
+app/services/generation_service.py. No API-shape or model changes; RegulationChunk.score semantics
+changed from hybrid-RRF to cosine (only used for logging/ordering downstream). Follow-ups: consider
+a min_score for search_uploaded_regulations (currently 0.0); `_match_benchmark_topic` tier-1
+substring rule can false-match very short titles ("IT" ⊂ "exit") — left as-is, recently audited.
+UNTESTED here (no build/test in this env).
+
 # Pre-production fix (2026-07-06) — ETag optimistic concurrency on draft saves
 Closes the audit's top HIGH: every save was read→modify→upsert(REPLACE) with no condition, so two
 concurrent editors silently overwrote each other (last write wins). Scope kept minimal per user
