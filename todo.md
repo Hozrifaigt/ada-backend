@@ -1,3 +1,31 @@
+# Pre-production fix (2026-07-06) — ETag optimistic concurrency on draft saves
+Closes the audit's top HIGH: every save was read→modify→upsert(REPLACE) with no condition, so two
+concurrent editors silently overwrote each other (last write wins). Scope kept minimal per user
+("fix it for now only") — backend only, drafts partition only (versions/audit rows are append-only
+and don't need it).
+1. **draft_storage.py:** `get_draft` records the entity etag per instance (`_etags`; the service is
+   per-request, so the map spans exactly one read→modify→write cycle). `update_draft` now writes with
+   `update_entity(etag, MatchConditions.IfNotModified)` when an etag is known and raises the new
+   `DraftConflictError` on 412 (unconditional upsert fallback when the draft wasn't read through this
+   instance — unchanged behavior). Etag refreshed after every successful write so multi-save requests
+   keep working.
+2. **Overflow-blob race fixed alongside:** the >450KB overflow blob is uploaded BEFORE the entity
+   write and previously used the shared name `draft_{id}.json`, so a LOSING writer would still have
+   clobbered the winner's payload. Blob names are now unique per write; the entity write is the
+   commit point. Replaced blobs are deleted after a successful write (`_remember_write`), a rejected
+   write deletes its own blob, and `delete_draft` resolves the pointer from the entity (legacy fixed
+   name still attempted for old blobs).
+3. **main.py:** global `DraftConflictError` handler → 409 with the reload-and-retry message in both
+   `error` and `detail`. Caveat: endpoints with broad `except Exception → HTTPException(500,
+   detail=str(e))` intercept the exception first, so some conflicts surface as 500 — but the
+   actionable message still reaches the UI via `detail`. Per-endpoint 409 mapping = follow-up.
+## Review
+Two files changed: `app/services/draft_storage.py`, `app/main.py`. No frontend changes (panels
+already display `detail`). No model/API-shape changes. Follow-ups identified: re-raise
+DraftConflictError (or HTTPException) before the broad excepts in drafts.py for clean 409s
+everywhere; frontend could offer an explicit "reload draft" action on conflict. UNTESTED here
+(no build/test in this env).
+
 # Feature update (2026-07-02) — variants × formats + format-aware preview
 1. **Shared module `review_diff.py`** (diff_ops/review_units/removed_sections/filter_review_draft) —
    Word AND PDF builders use it; word_export_service's private copies removed.

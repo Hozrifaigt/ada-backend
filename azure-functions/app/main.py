@@ -13,6 +13,7 @@ from app.api.policy import router as policy_router
 from app.config.logging_config import setup_logging
 from app.config.settings import settings
 from app.middleware import limiter, rate_limit_exceeded_handler
+from app.services.draft_storage import DraftConflictError
 
 if os.environ.get('DEBUG_MODE') == 'true':
     import debugpy
@@ -72,6 +73,22 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "error": exc.detail,
             "status_code": exc.status_code,
             "authenticated": exc.status_code not in [401, 403],
+            "path": str(request.url.path)
+        }
+    )
+
+
+@app.exception_handler(DraftConflictError)
+async def draft_conflict_handler(request: Request, exc: DraftConflictError):
+    """A conditional (ETag) draft write lost to a concurrent edit — the client must reload."""
+    logger.warning(f"Draft conflict on {request.url}: {exc}")
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": str(exc),
+            "detail": str(exc),  # panels surface response.data.detail
+            "status_code": 409,
+            "authenticated": True,
             "path": str(request.url.path)
         }
     )

@@ -4,7 +4,8 @@ import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from azure.data.tables import TableServiceClient, TableClient, UpdateMode
-from azure.core.exceptions import ResourceNotFoundError, AzureError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceNotFoundError, AzureError, ResourceModifiedError
 from app.models.draft_models import ClientMetadata, DraftMetadata, CompleteDraft
 from app.config.settings import settings
 
@@ -18,6 +19,16 @@ MAX_TABLE_CHARS = 450 * 1024
 OVERFLOW_CONTAINER = "draft-overflow"
 
 
+class DraftConflictError(Exception):
+    """A conditional (ETag) draft update lost to a concurrent write. The caller's copy is stale."""
+
+    def __init__(self, draft_id: str):
+        super().__init__(
+            f"Draft {draft_id} was modified by someone else while you were editing — "
+            "reload the draft and re-apply your change."
+        )
+
+
 class DraftStorageService:
     """Azure Table Storage service for temporary draft management."""
 
@@ -26,6 +37,13 @@ class DraftStorageService:
         self.table_name = table_name
         self.connection_string = connection_string
         self._blob_container = None  # lazily created BlobContainerClient for oversized payloads
+        # Optimistic concurrency: etag seen at get_draft time, per draft. The service is built
+        # fresh per request, so this map spans exactly one read->modify->write cycle; update_draft
+        # writes conditionally on it and raises DraftConflictError when someone else wrote first.
+        self._etags: Dict[str, str] = {}
+        # Overflow blob currently referenced by each draft's entity (as of our last read/write),
+        # so a successful update can clean up the blob it replaced.
+        self._blob_names: Dict[str, str] = {}
 
         try:
             self.table_service = TableServiceClient.from_connection_string(
@@ -92,6 +110,25 @@ class DraftStorageService:
         logger.info(f"Payload {len(json_str)} chars exceeds table limit; stored in blob '{blob_name}'")
         return entity
 
+    def _remember_write(self, draft_id: str, result: Optional[Dict[str, Any]], entity: Dict[str, Any]):
+        """After a successful entity write: refresh the tracked etag, delete the overflow blob the
+        write replaced (best-effort), and track the new one."""
+        etag = (result or {}).get('etag')
+        if etag:
+            self._etags[draft_id] = etag
+
+        new_blob = entity.get('draft_data_blob')
+        old_blob = self._blob_names.get(draft_id)
+        if old_blob and old_blob != new_blob:
+            try:
+                self._overflow_container().delete_blob(old_blob)
+            except Exception:
+                pass  # orphaned blob; harmless
+        if new_blob:
+            self._blob_names[draft_id] = new_blob
+        else:
+            self._blob_names.pop(draft_id, None)
+
     def _load_payload(self, entity: Dict[str, Any]) -> str:
         """Read a JSON payload stored by _store_payload (blob overflow or table chunks)."""
         blob_name = entity.get('draft_data_blob')
@@ -128,7 +165,12 @@ class DraftStorageService:
             }
 
             # Chunk into table properties, or overflow to blob when past the 1 MB entity cap.
-            self._store_payload(entity, draft_json, blob_name=f"draft_{draft_id}.json")
+            # The blob name is unique PER WRITE (not per draft): the blob is uploaded before the
+            # entity, so with a shared name a concurrent writer that then LOSES the conditional
+            # entity write would already have overwritten the winner's payload. Unique names make
+            # the entity write the single commit point; the loser's blob is just an orphan.
+            self._store_payload(entity, draft_json,
+                                blob_name=f"draft_{draft_id}_{uuid.uuid4().hex[:8]}.json")
 
             return entity
 
@@ -175,7 +217,10 @@ class DraftStorageService:
             draft_dict = draft.model_dump(mode='json')
 
             entity = self._serialize_draft(draft_dict)
-            self.table_client.create_entity(entity=entity)
+            result = self.table_client.create_entity(entity=entity)
+
+            # Track etag/blob so a later update in this same request stays conditional.
+            self._remember_write(draft_dict['id'], result, entity)
 
             logger.info(f"Created draft: {draft_dict['id']}")
             return True
@@ -197,6 +242,15 @@ class DraftStorageService:
                 partition_key='draft',
                 row_key=draft_id
             )
+
+            # Remember the entity's etag (and overflow blob, if any) for this request's
+            # eventual conditional update_draft.
+            etag = (getattr(entity, 'metadata', None) or {}).get('etag')
+            if etag:
+                self._etags[draft_id] = etag
+            blob_name = entity.get('draft_data_blob')
+            if blob_name:
+                self._blob_names[draft_id] = blob_name
 
             draft_dict = self._deserialize_draft(entity)
             # Convert dictionary to CompleteDraft model
@@ -243,12 +297,38 @@ class DraftStorageService:
             # REPLACE (not the default MERGE) so properties dropped between saves — stale
             # chunk props or a blob pointer when a draft shrinks back under the limit — are
             # actually removed. Safe because _serialize_draft rebuilds the full entity.
-            self.table_client.upsert_entity(entity=entity, mode=UpdateMode.REPLACE)
+            #
+            # Conditional on the etag captured at get_draft: if someone else wrote in between,
+            # the write fails (DraftConflictError) instead of silently discarding their work.
+            # No etag (draft not read through this instance) → unconditional upsert, as before.
+            etag = self._etags.get(draft_id)
+            if etag:
+                result = self.table_client.update_entity(
+                    entity=entity,
+                    mode=UpdateMode.REPLACE,
+                    etag=etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            else:
+                result = self.table_client.upsert_entity(entity=entity, mode=UpdateMode.REPLACE)
 
+            self._remember_write(draft_id, result, entity)
 
             logger.info(f"Updated draft: {draft_id}")
             return True
-            
+
+        except ResourceModifiedError:
+            logger.warning(f"Concurrent modification of draft {draft_id}: etag {etag} is stale, "
+                           f"rejecting update")
+            # The rejected write's own overflow blob (uploaded before the entity write) is
+            # unreferenced — remove it rather than leaving an orphan.
+            lost_blob = entity.get('draft_data_blob')
+            if lost_blob and lost_blob != self._blob_names.get(draft_id):
+                try:
+                    self._overflow_container().delete_blob(lost_blob)
+                except Exception:
+                    pass
+            raise DraftConflictError(draft_id)
         except AzureError as e:
             logger.error(f"Azure error updating draft {draft_id}: {e}")
             return False
@@ -262,16 +342,31 @@ class DraftStorageService:
         Returns True if successful, False if not found or error.
         """
         try:
+            # Find the referenced overflow blob (unique name per write) before the entity goes.
+            blob_name = self._blob_names.get(draft_id)
+            if not blob_name:
+                try:
+                    entity = self.table_client.get_entity(partition_key='draft', row_key=draft_id)
+                    blob_name = entity.get('draft_data_blob')
+                except Exception:
+                    blob_name = None
+
             self.table_client.delete_entity(
                 partition_key='draft',
                 row_key=draft_id
             )
+            self._etags.pop(draft_id, None)
+            self._blob_names.pop(draft_id, None)
 
             # Best-effort cleanup of the overflow blob (only exists for oversized drafts).
-            try:
-                self._overflow_container().delete_blob(f"draft_{draft_id}.json")
-            except Exception:
-                pass
+            # The fixed name covers blobs written before names became unique-per-write.
+            for name in {blob_name, f"draft_{draft_id}.json"}:
+                if not name:
+                    continue
+                try:
+                    self._overflow_container().delete_blob(name)
+                except Exception:
+                    pass
 
             logger.info(f"Deleted draft: {draft_id}")
             return True
